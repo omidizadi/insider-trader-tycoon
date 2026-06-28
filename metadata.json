@@ -1,0 +1,6 @@
+{
+  "name": "Insider Trader Tycoon",
+  "description": "Get backchannel tips, intercept private leaks, and trade stock with absolute foresight before the public catches on! Outrun the SEC and spend GEMS to extend your sessions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
