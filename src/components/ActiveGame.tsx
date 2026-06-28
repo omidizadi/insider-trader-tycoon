@@ -89,10 +89,12 @@ export default function ActiveGame({
   const [ticksRemaining, setTicksRemaining] = useState<number>(0);
   const [currentNews, setCurrentNews] = useState<NewsHeadline | null>(null);
   const [isNewsMinimized, setIsNewsMinimized] = useState<boolean>(false);
+  const [showNewsPopup, setShowNewsPopup] = useState<boolean>(false);
 
   useEffect(() => {
     if (currentNews) {
       setIsNewsMinimized(false);
+      setShowNewsPopup(false);
     }
   }, [currentNews]);
   const [cooldownTime, setCooldownTime] = useState<number>(0);
@@ -144,6 +146,7 @@ export default function ActiveGame({
     setTradingSubPhase('idle');
     setTicksRemaining(0);
     setCurrentNews(null);
+    setShowNewsPopup(false);
     setCooldownTime(0);
     setUsedNewsIds(new Set());
     setActivePointIndex(9);
@@ -278,6 +281,7 @@ export default function ActiveGame({
       setTradingSubPhase('auto_drift_init');
     } else if (tradingSubPhase === 'news_pending') {
       setCurrentNews(null); // Clear active news
+      setShowNewsPopup(false);
       setTicksRemaining(11);
       setTradingSubPhase('auto_drift_impact');
     }
@@ -374,6 +378,7 @@ export default function ActiveGame({
     // Handle sub-phase transition!
     if (tradingSubPhase === 'news_pending') {
       setCurrentNews(null); // Clear active news
+      setShowNewsPopup(false);
       setTicksRemaining(11);
       setTradingSubPhase('auto_drift_impact');
     }
@@ -454,6 +459,7 @@ export default function ActiveGame({
       });
 
       setCurrentNews(null); // Clear active news
+      setShowNewsPopup(false);
       setTicksRemaining(11);
       setTradingSubPhase('auto_drift_impact');
     }
@@ -535,6 +541,7 @@ export default function ActiveGame({
     setTradingSubPhase('idle');
     setTicksRemaining(0);
     setCurrentNews(null);
+    setShowNewsPopup(false);
     setCooldownTime(0);
     setUsedNewsIds(new Set());
     setActivePointIndex(9);
@@ -691,59 +698,58 @@ export default function ActiveGame({
   const currentCoord = chartInfo.coords[Math.min(activePointIndex, chartInfo.coords.length - 1)] || { x: 0, y: 0 };
 
   return (
-    <div className="flex flex-col justify-start items-center min-h-full w-full max-w-2xl mx-auto p-1 sm:p-2 select-none">
+    <div className="flex flex-col items-center h-full w-full max-w-2xl mx-auto p-1 sm:p-2 select-none">
       
       {/* Top Session HUD bar */}
-      <div id="session_hud" className="w-full flex justify-between items-center mb-2.5 bg-slate-800 text-white rounded-[24px] p-3 border-2 border-slate-800 shadow-[4px_4px_0_0_#1e293b]">
-        <div className="flex items-center gap-1.5">
-          <Coins className="w-4 h-4 text-yellow-400 shrink-0" />
-          <div className="text-left leading-none">
-            <span className="text-[9px] font-mono uppercase tracking-wider text-slate-300 block">AVAILABLE CASH</span>
-            <span id="label_bankroll" className="font-mono text-sm font-black text-yellow-350">
-              💵 ${gameState.cash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </span>
-          </div>
-        </div>
-
-        <div className="text-right leading-none border-l border-slate-700 pl-3">
-          <span className="text-[9px] font-mono tracking-wider uppercase text-slate-300 block">LEVEL / ROUND</span>
-          <span className="font-mono font-black text-xs text-slate-100">
-            #{gameState.roundNumber} <span className="text-[9px] text-yellow-400">({gameState.currentCompany.ticker})</span>
-          </span>
-        </div>
-      </div>
-
-      {/* Secondary HUD: Actions & Gems */}
-      <div className="w-full grid grid-cols-2 gap-2 mb-3 font-mono text-xs">
-        <div className="bg-slate-900 text-white rounded-xl px-3 py-1.5 border-2 border-slate-800 flex justify-between items-center shadow-[2px_2px_0_0_#1e293b]">
-          <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider flex items-center gap-1">
-            🔑 KEYS Left:
-          </span>
+      <div id="session_hud" className="w-full flex justify-between items-center mb-2.5 bg-slate-800 text-white rounded-[24px] p-3 border-2 border-slate-800 shadow-[4px_4px_0_0_#1e293b] shrink-0">
+        <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
-            <span className={`font-black text-xs ${actionsRemaining <= 2 ? 'text-red-400 animate-pulse' : 'text-yellow-450 text-yellow-400'}`}>
-              {actionsRemaining} / 10
-            </span>
-            <button 
-              onClick={() => {
-                if (settings.soundEnabled) playSound('click');
-                setShowRefillNeeded(true);
-              }}
-              className="bg-slate-800 hover:bg-slate-700 active:scale-95 text-white font-extrabold text-[8px] px-1.5 py-0.5 rounded border border-slate-600 cursor-pointer"
-            >
-              + REFILL
-            </button>
+            <Coins className="w-4 h-4 text-yellow-400 shrink-0" />
+            <div className="text-left leading-none">
+              <span className="text-[9px] font-mono uppercase tracking-wider text-slate-300 block">AVAILABLE CASH</span>
+              <span id="label_bankroll" className="font-mono text-sm font-black text-yellow-350">
+                💵 ${gameState.cash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-1 border-l border-slate-700 pl-3">
+            <div className="text-left leading-none">
+              <span className="text-[9px] font-mono uppercase tracking-wider text-slate-300 block">GEMS</span>
+              <span className="font-mono text-xs font-black text-emerald-400">
+                💎 {gems}
+              </span>
+            </div>
           </div>
         </div>
-        <div className="bg-slate-900 text-white rounded-xl px-3 py-1.5 border-2 border-slate-800 flex justify-between items-center shadow-[2px_2px_0_0_#1e293b]">
-          <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider flex items-center gap-1">
-            💎 GEMS:
-          </span>
-          <span className="font-black text-emerald-400 flex items-center gap-1">
-            {gems}
-          </span>
+
+        <div className="flex items-center gap-3">
+          <div className="text-right leading-none border-r border-slate-700 pr-3">
+            <span className="text-[9px] font-mono tracking-wider uppercase text-slate-300 block">KEYS LEFT</span>
+            <div className="flex items-center gap-1.5 justify-end">
+              <span className={`font-mono font-black text-xs ${actionsRemaining <= 2 ? 'text-red-400 animate-pulse' : 'text-yellow-400'}`}>
+                🔑 {actionsRemaining}/10
+              </span>
+              <button
+                onClick={() => {
+                  if (settings.soundEnabled) playSound('click');
+                  setShowRefillNeeded(true);
+                }}
+                className="bg-slate-700 hover:bg-slate-600 active:scale-95 text-white font-extrabold text-[8px] px-1.5 py-0.5 rounded border border-slate-600 cursor-pointer"
+              >
+                + REFILL
+              </button>
+            </div>
+          </div>
+          <div className="text-right leading-none">
+            <span className="text-[9px] font-mono tracking-wider uppercase text-slate-300 block">LEVEL / ROUND</span>
+            <span className="font-mono font-black text-xs text-slate-100">
+              #{gameState.roundNumber} <span className="text-[9px] text-yellow-400">({gameState.currentCompany.ticker})</span>
+            </span>
+          </div>
         </div>
       </div>
 
+      <div className="flex-1 flex flex-col justify-center w-full min-h-0">
       <AnimatePresence mode="wait">
         
         {/* Phase 1: Discovery card */}
@@ -753,10 +759,10 @@ export default function ActiveGame({
             initial={{ opacity: 0, scale: 0.95, y: 15 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95, y: -15 }}
-            className="w-full flex-1 flex flex-col justify-between"
+            className="w-full"
           >
             {/* The Company Folder view */}
-            <div className="w-full bg-white rounded-[32px] border-4 border-slate-800 shadow-[6px_6px_0_0_#1e293b] overflow-hidden p-5 flex-1 flex flex-col justify-between space-y-4">
+            <div className="w-full bg-white rounded-[32px] border-4 border-slate-800 shadow-[6px_6px_0_0_#1e293b] overflow-hidden p-5 flex flex-col justify-between space-y-4">
               
               <div className="space-y-3.5">
                 {/* Visual Category Label */}
@@ -848,10 +854,10 @@ export default function ActiveGame({
             exit={{ opacity: 0, scale: 0.95, y: -15 }}
             className="w-full flex-1 flex flex-col justify-between"
           >
-            <div className="w-full bg-white rounded-[32px] border-4 border-slate-800 shadow-[6px_6px_0_0_#1e293b] overflow-hidden p-4 flex-1 flex flex-col justify-between space-y-3 relative">
+            <div className="w-full bg-white rounded-[32px] border-4 border-slate-800 shadow-[6px_6px_0_0_#1e293b] p-4 flex-1 flex flex-col justify-between space-y-3 relative">
               
               <div className={`flex-1 flex flex-col justify-between space-y-3 transition-opacity duration-300 ${
-                tradingSubPhase === 'news_pending' && currentNews && !isNewsMinimized ? 'opacity-15 pointer-events-none' : 'opacity-100'
+                tradingSubPhase === 'news_pending' && currentNews && showNewsPopup && !isNewsMinimized ? 'opacity-0 pointer-events-none' : 'opacity-100'
               }`}>
               
               {/* Top row of rounded panel: Retreat button if subphase is idle */}
@@ -1001,17 +1007,8 @@ export default function ActiveGame({
               </div>
 
               {/* Position stats log wrapper (Buy vs Value) */}
+              {gameState.position && (
               <div className="bg-slate-50 p-4 border-2 border-slate-800 rounded-[24px] shadow-[4px_4px_0_0_#1e293b]">
-                {!gameState.position ? (
-                  <div className="text-center py-3">
-                    <span className="text-[10px] text-slate-500 font-mono font-black uppercase block tracking-widest animate-pulse">
-                      🤫 NO CONFIDENTIAL POSITION ACTIVE
-                    </span>
-                    <p className="text-[11px] text-slate-400 mt-1 leading-normal max-w-[280px] mx-auto">
-                      Acquire an initial $100 block of shares to begin tracking the backchannel price trace.
-                    </p>
-                  </div>
-                ) : (
                   <div className="flex flex-col space-y-3">
                     {/* Top primary row: large metrics */}
                     <div className="grid grid-cols-2 gap-3 items-center">
@@ -1049,9 +1046,9 @@ export default function ActiveGame({
                         </strong>
                       </div>
                     </div>
+                    </div>
                   </div>
-                )}
-              </div>
+              )}
 
               {/* Game interaction console panel */}
               <div className="space-y-3 pt-1">
@@ -1206,24 +1203,21 @@ export default function ActiveGame({
 
               </div>
 
-              {tradingSubPhase === 'news_pending' && currentNews && !isNewsMinimized && (
-                <div className="absolute inset-0 z-50 flex items-center justify-center p-3 bg-slate-100/75">
+              {tradingSubPhase === 'news_pending' && currentNews && showNewsPopup && !isNewsMinimized && (
+                <div className="absolute inset-0 z-50 flex items-center justify-center p-3">
                   <motion.div
                     key="news_pending"
                     initial={{ opacity: 0, scale: 0.9, y: 15 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.9, y: -15 }}
-                    className="w-full max-w-sm bg-slate-900 text-white border-4 border-slate-800 rounded-[24px] p-4 shadow-[0_16px_48px_rgba(0,0,0,0.5),4px_4px_0_0_#1e293b] space-y-3.5 relative overflow-hidden"
+                    className="w-full bg-slate-900 text-white border-4 border-slate-800 rounded-[24px] p-4 shadow-[4px_4px_0_0_#1e293b] space-y-3.5 relative"
                   >
                     {/* Header row with Red Breaking News Flash bar & Minimize button */}
                     <div className="flex items-center justify-between gap-2">
-                      <div className="flex-1 flex justify-between items-center bg-red-600 px-3 py-1 rounded-lg border-2 border-slate-800 text-white font-black font-mono text-[9px] uppercase tracking-widest animate-pulse">
-                        <span className="flex items-center gap-1">
-                          <Newspaper className="w-3.5 h-3.5 shrink-0" />
-                          BREAKING NEWS FLASH
-                        </span>
-                        <span className="text-[8px] bg-slate-900 px-1.5 py-0.5 rounded text-red-400 border border-slate-700">
-                          {currentNews.source}
+                      <div className="flex-1 flex justify-center items-center bg-red-600 px-3 py-1.5 rounded-lg border-2 border-slate-800 text-white font-black font-mono text-sm uppercase tracking-widest animate-pulse">
+                        <span className="flex items-center gap-1.5">
+                          <Newspaper className="w-4 h-4 shrink-0" />
+                          Insider Tip
                         </span>
                       </div>
                       <button
@@ -1247,10 +1241,10 @@ export default function ActiveGame({
                     </div>
 
                     {/* Current Stock Holdings Value and Returns display */}
-                    <div className="bg-slate-800/50 border-2 border-slate-700/40 rounded-xl p-2.5 flex items-center justify-between text-xs font-mono">
+                    <div className="bg-slate-800/50 border-2 border-slate-700/40 rounded-xl p-3 flex items-center justify-between text-xs font-mono">
                       <div className="flex flex-col text-left">
-                        <span className="text-[8px] text-slate-400 uppercase font-black tracking-wider">Holdings Value</span>
-                        <span className="text-xs font-extrabold text-slate-100">
+                        <span className="text-[9px] text-slate-400 uppercase font-black tracking-wider">Holdings Value</span>
+                        <span className="text-lg font-extrabold text-slate-100">
                           {gameState.position 
                             ? `$${positionValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                             : '$0.00'
@@ -1258,19 +1252,19 @@ export default function ActiveGame({
                         </span>
                       </div>
                       <div className="flex flex-col text-right">
-                        <span className="text-[8px] text-slate-400 uppercase font-black tracking-wider">Position Return</span>
+                        <span className="text-[9px] text-slate-400 uppercase font-black tracking-wider">Return</span>
                         {gameState.position ? (
-                          <span className={`text-xs font-extrabold flex items-center justify-end gap-0.5 ${
+                          <span className={`inline-flex items-center gap-1 font-extrabold text-lg font-mono ${
                             liveProfit > 0 ? 'text-emerald-400' : liveProfit < 0 ? 'text-rose-400' : 'text-slate-400'
                           }`}>
-                            {liveProfit > 0 ? '▲' : liveProfit < 0 ? '▼' : ''}
+                            {liveProfit > 0 ? <TrendingUp className="w-4 h-4 shrink-0" /> : liveProfit < 0 ? <TrendingDown className="w-4 h-4 shrink-0" /> : null}
                             {returnPercent !== 0 ? `${returnPercent.toFixed(1)}%` : '0.0%'}
-                            <span className="text-[9px] opacity-75 ml-1">
+                            <span className="text-xs opacity-75 ml-0.5">
                               ({liveProfit >= 0 ? '+' : ''}${liveProfit.toFixed(0)})
                             </span>
                           </span>
                         ) : (
-                          <span className="text-[10px] font-extrabold text-slate-500">NO ACTIVE SHARES</span>
+                          <span className="text-sm font-extrabold text-slate-500">NO ACTIVE SHARES</span>
                         )}
                       </div>
                     </div>
@@ -1279,10 +1273,7 @@ export default function ActiveGame({
                     <div className="bg-slate-950/80 border-2 border-slate-800 rounded-2xl p-3 space-y-3">
                       
                       {/* MAX Toggle Selector Header */}
-                      <div className="flex justify-between items-center pb-2 border-b border-slate-800">
-                        <span className="text-[10px] font-mono font-bold text-slate-400 tracking-wider">
-                          🚀 LIQUIDITY VELOCITY LIMIT
-                        </span>
+                      <div className="flex justify-end items-center pb-2 border-b border-slate-800">
                         <button
                           type="button"
                           onClick={() => {
@@ -1300,12 +1291,12 @@ export default function ActiveGame({
                         </button>
                       </div>
 
-                      {/* Adjuster Rows */}
-                      <div className="space-y-2.5">
+                      {/* Adjuster Rows — Buy & Sell side by side */}
+                      <div className="grid grid-cols-2 gap-2.5">
                         
-                        {/* BUY ADJUSTER */}
-                        <div className="flex items-center justify-between gap-2 bg-slate-900/60 p-2 rounded-xl border border-slate-800">
-                          <div className="flex items-center gap-1.5 shrink-0">
+                        {/* BUY COLUMN */}
+                        <div className="flex flex-col gap-1.5 bg-slate-900/60 p-2 rounded-xl border border-slate-800">
+                          <div className="flex items-center justify-center gap-1">
                             <button
                               type="button"
                               disabled={isMaxToggled || buyAmount <= 100}
@@ -1313,7 +1304,7 @@ export default function ActiveGame({
                                 if (settings.soundEnabled) playSound('click');
                                 setBuyAmount(prev => Math.max(100, prev - 100));
                               }}
-                              className={`w-7 h-7 flex items-center justify-center rounded-lg border-2 border-slate-750 font-black text-xs select-none ${
+                              className={`w-6 h-6 flex items-center justify-center rounded-lg border-2 border-slate-750 font-black text-[10px] select-none ${
                                 isMaxToggled || buyAmount <= 100 
                                   ? 'bg-slate-850 text-slate-600 border-slate-800 opacity-40 cursor-not-allowed' 
                                   : 'bg-slate-800 hover:bg-slate-700 active:scale-95 text-white cursor-pointer'
@@ -1322,12 +1313,9 @@ export default function ActiveGame({
                               ▼
                             </button>
                             
-                            <div className="text-center w-24 leading-none">
-                              <span className="text-[8px] text-slate-500 font-mono block">BUY INTEL VALUE</span>
-                              <span className="text-xs font-mono font-black text-emerald-400">
-                                ${isMaxToggled ? Math.floor(gameState.cash).toLocaleString() : buyAmount}
-                              </span>
-                            </div>
+                            <span className="text-xs font-mono font-black text-emerald-400 w-20 text-center">
+                              ${isMaxToggled ? Math.floor(gameState.cash).toLocaleString() : buyAmount}
+                            </span>
 
                             <button
                               type="button"
@@ -1339,7 +1327,7 @@ export default function ActiveGame({
                                   return Math.min(next, Math.floor(gameState.cash));
                                 });
                               }}
-                              className={`w-7 h-7 flex items-center justify-center rounded-lg border-2 border-slate-750 font-black text-xs select-none ${
+                              className={`w-6 h-6 flex items-center justify-center rounded-lg border-2 border-slate-750 font-black text-[10px] select-none ${
                                 isMaxToggled || buyAmount >= gameState.cash 
                                   ? 'bg-slate-850 text-slate-600 border-slate-800 opacity-40 cursor-not-allowed' 
                                   : 'bg-slate-800 hover:bg-slate-700 active:scale-95 text-white cursor-pointer'
@@ -1349,7 +1337,6 @@ export default function ActiveGame({
                             </button>
                           </div>
 
-                          {/* Main BUY Trigger */}
                           <button
                             type="button"
                             disabled={gameState.cash < (isMaxToggled ? 1 : buyAmount)}
@@ -1357,19 +1344,19 @@ export default function ActiveGame({
                               const finalBuy = isMaxToggled ? gameState.cash : buyAmount;
                               handleBuyTransaction(finalBuy);
                             }}
-                            className={`flex-1 font-mono font-black text-xs py-2 rounded-xl flex items-center justify-center gap-1 transition-transform border-2 border-slate-800 shadow-[1px_1px_0_0_#1e293b] select-none active:translate-y-0.5 ${
+                            className={`w-full font-mono font-black text-xs py-2 rounded-xl flex items-center justify-center gap-1 transition-transform border-2 border-slate-800 shadow-[1px_1px_0_0_#1e293b] select-none active:translate-y-0.5 ${
                               gameState.cash >= (isMaxToggled ? 1 : buyAmount)
                                 ? 'bg-emerald-500 hover:bg-emerald-450 text-white cursor-pointer'
                                 : 'bg-slate-800 text-slate-500 border-slate-800 opacity-40 cursor-not-allowed'
                             }`}
                           >
-                            ➕ BUY SHARE BLOCK
+                            Buy
                           </button>
                         </div>
 
-                        {/* SELL ADJUSTER */}
-                        <div className="flex items-center justify-between gap-2 bg-slate-900/60 p-2 rounded-xl border border-slate-800">
-                          <div className="flex items-center gap-1.5 shrink-0">
+                        {/* SELL COLUMN */}
+                        <div className="flex flex-col gap-1.5 bg-slate-900/60 p-2 rounded-xl border border-slate-800">
+                          <div className="flex items-center justify-center gap-1">
                             <button
                               type="button"
                               disabled={isMaxToggled || !gameState.position || sellAmount <= 100}
@@ -1377,7 +1364,7 @@ export default function ActiveGame({
                                 if (settings.soundEnabled) playSound('click');
                                 setSellAmount(prev => Math.max(100, prev - 100));
                               }}
-                              className={`w-7 h-7 flex items-center justify-center rounded-lg border-2 border-slate-750 font-black text-xs select-none ${
+                              className={`w-6 h-6 flex items-center justify-center rounded-lg border-2 border-slate-750 font-black text-[10px] select-none ${
                                 isMaxToggled || !gameState.position || sellAmount <= 100 
                                   ? 'bg-slate-850 text-slate-600 border-slate-800 opacity-40 cursor-not-allowed' 
                                   : 'bg-slate-800 hover:bg-slate-700 active:scale-95 text-white cursor-pointer'
@@ -1386,14 +1373,11 @@ export default function ActiveGame({
                               ▼
                             </button>
                             
-                            <div className="text-center w-24 leading-none">
-                              <span className="text-[8px] text-slate-500 font-mono block">SELL TRACE VALUE</span>
-                              <span className="text-xs font-mono font-black text-rose-400">
-                                ${isMaxToggled 
-                                  ? (gameState.position ? Math.floor(gameState.position.shares * currentPrice).toLocaleString() : 0) 
-                                  : sellAmount}
-                              </span>
-                            </div>
+                            <span className="text-xs font-mono font-black text-rose-400 w-20 text-center">
+                              ${isMaxToggled 
+                                ? (gameState.position ? Math.floor(gameState.position.shares * currentPrice).toLocaleString() : 0) 
+                                : sellAmount}
+                            </span>
 
                             <button
                               type="button"
@@ -1406,7 +1390,7 @@ export default function ActiveGame({
                                   return Math.min(next, Math.floor(maxVal));
                                 });
                               }}
-                              className={`w-7 h-7 flex items-center justify-center rounded-lg border-2 border-slate-750 font-black text-xs select-none ${
+                              className={`w-6 h-6 flex items-center justify-center rounded-lg border-2 border-slate-750 font-black text-[10px] select-none ${
                                 isMaxToggled || !gameState.position || sellAmount >= (gameState.position.shares * currentPrice) 
                                   ? 'bg-slate-850 text-slate-600 border-slate-800 opacity-40 cursor-not-allowed' 
                                   : 'bg-slate-800 hover:bg-slate-700 active:scale-95 text-white cursor-pointer'
@@ -1416,7 +1400,6 @@ export default function ActiveGame({
                             </button>
                           </div>
 
-                          {/* Main SELL Trigger */}
                           <button
                             type="button"
                             disabled={!gameState.position}
@@ -1425,13 +1408,13 @@ export default function ActiveGame({
                               const finalSell = isMaxToggled ? maxVal : sellAmount;
                               handlePartialSellTransaction(finalSell);
                             }}
-                            className={`flex-1 font-mono font-black text-xs py-2 rounded-xl flex items-center justify-center gap-1 transition-transform border-2 border-slate-800 shadow-[1px_1px_0_0_#1e293b] select-none active:translate-y-0.5 ${
+                            className={`w-full font-mono font-black text-xs py-2 rounded-xl flex items-center justify-center gap-1 transition-transform border-2 border-slate-800 shadow-[1px_1px_0_0_#1e293b] select-none active:translate-y-0.5 ${
                               gameState.position
                                 ? 'bg-rose-500 hover:bg-rose-450 text-white cursor-pointer'
                                 : 'bg-slate-800 text-slate-500 border-slate-800 opacity-40 cursor-not-allowed'
                             }`}
                           >
-                            ➖ SELL SHARE BLOCK
+                            Sell
                           </button>
                         </div>
 
@@ -1467,8 +1450,34 @@ export default function ActiveGame({
 
             </div>
 
+            {/* "Next" button to open breaking news popup */}
+            {tradingSubPhase === 'news_pending' && currentNews && !showNewsPopup && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mt-3 flex justify-center w-full"
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (settings.soundEnabled) playSound('click');
+                    setShowNewsPopup(true);
+                  }}
+                  className="w-full bg-red-600 hover:bg-red-500 text-white font-black font-mono text-xs py-2.5 px-4 border-4 border-slate-800 rounded-2xl shadow-[4px_4px_0_0_#1e293b] flex items-center justify-between gap-2 cursor-pointer select-none animate-pulse active:translate-y-0.5 transition-transform"
+                >
+                  <span className="flex items-center gap-1.5 text-[11px] tracking-wide">
+                    <Newspaper className="w-4 h-4 shrink-0 text-yellow-300" />
+                    🚨 BREAKING NEWS INCOMING!
+                  </span>
+                  <span className="bg-slate-900 border-2 border-slate-800 text-yellow-300 text-[10px] font-black px-2.5 py-1 rounded-lg">
+                    NEXT ➜
+                  </span>
+                </button>
+              </motion.div>
+            )}
+
             {/* Minimized Breaking News Bottom Indicator Row */}
-            {tradingSubPhase === 'news_pending' && currentNews && isNewsMinimized && (
+            {tradingSubPhase === 'news_pending' && currentNews && showNewsPopup && isNewsMinimized && (
               <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -1635,6 +1644,7 @@ export default function ActiveGame({
         )}
 
       </AnimatePresence>
+      </div>
 
       {/* Refill / Exchange Confidential Modal Overlay */}
       <AnimatePresence>
