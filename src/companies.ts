@@ -261,12 +261,15 @@ const build150Companies = (): Company[] => {
 
 export const CUTE_COMPANIES: Company[] = [...build150Companies(), ...EXTRA_COMPANIES];
 
-export function getRandomCompany(playedIds: string[]): Company {
+export function getRandomCompany(playedIds: string[], minVolatility = 0): Company {
   const unplayed = CUTE_COMPANIES.filter(c => !playedIds.includes(c.id));
-  if (unplayed.length > 0) {
-    const pick = unplayed[Math.floor(Math.random() * unplayed.length)];
-    return pick;
-  }
-  // If all played, recycle
-  return CUTE_COMPANIES[Math.floor(Math.random() * CUTE_COMPANIES.length)];
+  const pool = unplayed.length > 0 ? unplayed : CUTE_COMPANIES;
+
+  // Filter by volatility floor (difficulty scaling), fall back to full pool
+  const filtered = minVolatility > 0
+    ? pool.filter(c => c.volatility >= minVolatility)
+    : [];
+  const finalPool = filtered.length > 0 ? filtered : pool;
+
+  return finalPool[Math.floor(Math.random() * finalPool.length)];
 }

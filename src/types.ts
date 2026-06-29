@@ -27,11 +27,20 @@ export interface Run {
   unlockedTitle: string;
 }
 
+export const START_CASH = 1000;
+
 export interface GameSettings {
   soundEnabled: boolean;
   hapticEnabled: boolean;
-  startCash: number;
-  chartSpeed: 'normal' | 'fast';
+}
+
+export interface GameRecord {
+  highestCashEver: number;
+  highestCashRunId: string | null;
+  highestCashDate: string | null;
+  longestRunRounds: number;
+  longestRunId: string | null;
+  longestRunDate: string | null;
 }
 
 export type GamePhase = 'menu' | 'discovery' | 'trading' | 'round_complete' | 'game_over';

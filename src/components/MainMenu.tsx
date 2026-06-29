@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Play, History, Settings, Trash2, Volume2, VolumeX, Coins, Calendar, X, HelpCircle, Trophy, BarChart3, PiggyBank } from 'lucide-react';
-import { Run, GameSettings } from '../types';
+import { Play, Trash2, Volume2, VolumeX, Calendar, Trophy, BarChart3 } from 'lucide-react';
+import { Run, GameSettings, GameRecord, START_CASH } from '../types';
 import { playSound } from '../utils/audio';
 
 interface MainMenuProps {
@@ -10,6 +10,7 @@ interface MainMenuProps {
   onClearHistory: () => void;
   settings: GameSettings;
   onUpdateSettings: (newSettings: GameSettings) => void;
+  records: GameRecord;
 }
 
 export default function MainMenu({
@@ -18,6 +19,7 @@ export default function MainMenu({
   onClearHistory,
   settings,
   onUpdateSettings,
+  records,
 }: MainMenuProps) {
   const [activeTab, setActiveTab] = useState<'main' | 'history' | 'settings'>('main');
 
@@ -34,19 +36,12 @@ export default function MainMenu({
     }
   };
 
-  const handleToggleHaptic = () => {
-    const updated = { ...settings, hapticEnabled: !settings.hapticEnabled };
-    onUpdateSettings(updated);
-    if (settings.soundEnabled) playSound('click');
-  };
-
-  const handleStartCashChange = (amount: number) => {
-    onUpdateSettings({ ...settings, startCash: amount });
-    if (settings.soundEnabled) playSound('click');
-  };
-
-  // Find high score
+  // Find high score from runs
   const highScore = runs.reduce((max, run) => (run.finalCash > max ? run.finalCash : max), 0);
+
+  // Check if the most recent run broke a record
+  const lastRunBrokeCashRecord = runs.length > 0 && runs[0].highestCash >= records.highestCashEver && records.highestCashEver > 0;
+  const lastRunBrokeRoundRecord = runs.length > 0 && runs[0].roundsPlayed >= records.longestRunRounds && records.longestRunRounds > 0;
 
   return (
     <div className="flex flex-col items-center justify-center min-h-full w-full max-w-2xl mx-auto p-1 sm:p-2 select-none">
@@ -132,9 +127,41 @@ export default function MainMenu({
                     </span>
                   </div>
                   <p className="text-[10px] text-slate-400 mt-1">
-                    Turn your starting ${settings.startCash} into a massive fortune!
+                    Turn your starting ${START_CASH} into a massive fortune!
                   </p>
                 </div>
+
+                {/* All-Time Records */}
+                {records.highestCashEver > 0 && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="bg-amber-50 border-2 border-slate-800 rounded-[20px] p-3 text-center">
+                      <span className="text-[9px] bg-amber-200 text-amber-800 font-mono font-bold px-2 py-0.5 rounded-full uppercase tracking-widest">
+                        🏆 BEST PEAK
+                      </span>
+                      <p className="text-lg font-black text-slate-800 mt-1.5 tabular-nums">
+                        ${records.highestCashEver.toLocaleString()}
+                      </p>
+                      {lastRunBrokeCashRecord && (
+                        <span className="text-[8px] bg-emerald-500 text-white font-extrabold px-2 py-0.5 rounded-full uppercase">
+                          NEW!
+                        </span>
+                      )}
+                    </div>
+                    <div className="bg-blue-50 border-2 border-slate-800 rounded-[20px] p-3 text-center">
+                      <span className="text-[9px] bg-blue-200 text-blue-800 font-mono font-bold px-2 py-0.5 rounded-full uppercase tracking-widest">
+                        🏅 LONGEST RUN
+                      </span>
+                      <p className="text-lg font-black text-slate-800 mt-1.5 tabular-nums">
+                        {records.longestRunRounds} Rds
+                      </p>
+                      {lastRunBrokeRoundRecord && (
+                        <span className="text-[8px] bg-emerald-500 text-white font-extrabold px-2 py-0.5 rounded-full uppercase">
+                          NEW!
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {/* Rules / Tip Callout */}
                 <div className="text-xs bg-yellow-50 rounded-[24px] p-4 border-2 border-slate-800 shadow-[3px_3px_0_0_#1e293b] flex gap-2.5 items-start text-slate-600">
@@ -209,7 +236,7 @@ export default function MainMenu({
                         </div>
                         <div className="text-right">
                           <span className="bg-slate-800 text-white font-mono text-[8px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
-                            {run.unlockedTitle?.replace(/🍎|🐕|🐈|🦁|👑|💀|🐹|🥑/g, '') || 'Novice'}
+                            {run.unlockedTitle?.replace(/[🍎🐕🐈🦁👑💀🐹🥑💎🍕]/g, '') || 'Novice'}
                           </span>
                           <p className="text-[9px] text-slate-400 mt-1 leading-none">
                             {run.companiesTradedCount} Trades • {run.roundsPlayed} Rds
@@ -249,31 +276,15 @@ export default function MainMenu({
 
 
 
-                {/* Speeds */}
+                {/* Difficulty info (read-only) */}
                 <div className="flex justify-between items-center p-3 bg-slate-50 border-2 border-slate-800 rounded-2xl">
                   <div>
-                    <p className="font-black text-xs text-slate-800 uppercase tracking-widest">DRIFT TICK RATE</p>
-                    <p className="text-[10px] text-slate-450 leading-normal">Horizontal chart advances</p>
+                    <p className="font-black text-xs text-slate-800 uppercase tracking-widest">MARKET DIFFICULTY</p>
+                    <p className="text-[10px] text-slate-450 leading-normal">Scales with your cash — richer = harder</p>
                   </div>
-                  <div className="flex gap-1.5">
-                    {(['normal', 'fast'] as const).map((spd) => (
-                      <button
-                        key={spd}
-                        id={`btn_speed_${spd}`}
-                        onClick={() => {
-                          onUpdateSettings({ ...settings, chartSpeed: spd });
-                          if (settings.soundEnabled) playSound('click');
-                        }}
-                        className={`px-2 py-1 text-[10px] font-mono font-black uppercase rounded-lg border-2 border-slate-800 shadow-[1px_1px_0_0_#1e293b] active:translate-y-0.5 transition-all ${
-                          settings.chartSpeed === spd
-                            ? 'bg-yellow-400 text-slate-800'
-                            : 'bg-white text-slate-500'
-                        }`}
-                      >
-                        {spd}
-                      </button>
-                    ))}
-                  </div>
+                  <span className="text-[10px] font-mono font-black text-amber-600 bg-amber-100 border-2 border-slate-800 rounded-lg px-2 py-1">
+                    📈 ADAPTIVE
+                  </span>
                 </div>
               </motion.div>
             )}

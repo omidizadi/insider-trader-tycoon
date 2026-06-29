@@ -1,27 +1,28 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   ArrowLeft, Coins, Check, AlertCircle, Sparkles, TrendingUp, TrendingDown, 
   HelpCircle, ChevronRight, CornerDownRight, Landmark, ArrowRight, RotateCcw,
   HandMetal, ShoppingCart, Star, Skull, HeartCrack, Volume2, Info, Newspaper, Clock
 } from 'lucide-react';
-import { Company, GameSessionState, GameSettings, TradePosition } from '../types';
+import { Company, GameSessionState, GameSettings, TradePosition, START_CASH } from '../types';
 import { getRandomCompany } from '../companies';
 import { playSound } from '../utils/audio';
 import { NewsHeadline, pickRandomHeadline } from '../utils/headlines';
+import { getDifficultyFactor, getMinVolatility, getNewsImpactMultiplier } from '../utils/difficulty';
 
 interface ActiveGameProps {
   settings: GameSettings;
   runsCount: number;
-  onFinishGame: (finalCash: number, companiesTraded: number, roundsPlayed: number) => void;
-  onExitToMenu: () => void;
+  onFinishGame: (finalCash: number, highestCash: number, companiesTraded: number, roundsPlayed: number) => void;
+  onExitGame: (finalCash: number, highestCash: number, companiesTraded: number, roundsPlayed: number) => void;
 }
 
 export default function ActiveGame({
   settings,
   runsCount,
   onFinishGame,
-  onExitToMenu
+  onExitGame
 }: ActiveGameProps) {
   
   // Initialize game session on first mount
@@ -40,14 +41,14 @@ export default function ActiveGame({
     }
 
     return {
-      cash: settings.startCash,
+      cash: START_CASH,
       currentCompany: startCompany,
       chartPoints: initialHistory,
       position: null,
       phase: 'discovery',
       roundNumber: 1,
       companiesTradedCount: 0,
-      highestCashInSession: settings.startCash,
+      highestCashInSession: START_CASH,
       lastRoundProfit: 0
     };
   });
@@ -100,15 +101,22 @@ export default function ActiveGame({
   const [cooldownTime, setCooldownTime] = useState<number>(0);
   const [usedNewsIds, setUsedNewsIds] = useState<Set<string>>(() => new Set());
   
-  const [buyAmount, setBuyAmount] = useState<number>(100);
-  const [sellAmount, setSellAmount] = useState<number>(100);
-  const [isMaxToggled, setIsMaxToggled] = useState<boolean>(false);
-
   // Transaction markers state for the active round
   const [transactions, setTransactions] = useState<{ index: number; price: number; type: 'buy' | 'sell'; amount: number }[]>([]);
 
   // Active point index state to scan along the pre-generated chart points
   const [activePointIndex, setActivePointIndex] = useState<number>(() => gameState.chartPoints.length - 1);
+
+  // Format large money amounts with K/M/B suffixes
+  const formatMoney = (value: number): string => {
+    const abs = Math.abs(value);
+    const sign = value < 0 ? '-' : '';
+    if (abs >= 1_000_000_000_000) return `${sign}$${(abs / 1_000_000_000_000).toFixed(1)}T`;
+    if (abs >= 1_000_000_000) return `${sign}$${(abs / 1_000_000_000).toFixed(1)}B`;
+    if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(1)}M`;
+    if (abs >= 10_000) return `${sign}$${(abs / 1_000).toFixed(1)}K`;
+    return `${sign}$${abs.toFixed(2)}`;
+  };
 
   // Performance-optimized Refs for Real-time Game Ticker
   const currentCompanyRef = useRef(gameState.currentCompany);
@@ -131,7 +139,7 @@ export default function ActiveGame({
   const handleSkipCompany = () => {
     if (settings.soundEnabled) playSound('skip');
     
-    const nextComp = getRandomCompany(playedCompanyIds.current);
+    const nextComp = getRandomCompany(playedCompanyIds.current, minVolatility);
     playedCompanyIds.current.push(nextComp.id);
 
     // Generate price history for the next company
@@ -231,16 +239,7 @@ export default function ActiveGame({
         }
       } else if (tradingSubPhase === 'news_pending' && currentNews) {
         // Pre-generate 11 points (6 impact + 5 cooldown)
-        let newsImpactMultiplier = 1.0;
-        if (currentNews.sentiment === 'positive') {
-          // Boosted positive news impact for massive, exciting rallies
-          newsImpactMultiplier = 3.0 + Math.random() * 1.5;
-        } else if (currentNews.sentiment === 'negative') {
-          // Amplified downward drops for high-risk trading thrills
-          newsImpactMultiplier = 2.5 + Math.random() * 1.5;
-        } else {
-          newsImpactMultiplier = 1.2 + Math.random() * 0.8;
-        }
+        const newsImpactMultiplier = getNewsImpactMultiplier(currentNews.sentiment, difficultyFactor);
         const totalImpact = currentNews.impactPercent * newsImpactMultiplier;
         const targetPrice = Math.max(1, Number((currentPriceTmp * (1 + totalImpact)).toFixed(2)));
         
@@ -335,14 +334,7 @@ export default function ActiveGame({
       const nextPoints = [...prev.chartPoints];
       if (tradingSubPhase === 'news_pending' && currentNews) {
         // Pre-generate 11 points (6 impact + 5 cooldown)
-        let newsImpactMultiplier = 1.0;
-        if (currentNews.sentiment === 'positive') {
-          newsImpactMultiplier = 3.0 + Math.random() * 1.5;
-        } else if (currentNews.sentiment === 'negative') {
-          newsImpactMultiplier = 2.5 + Math.random() * 1.5;
-        } else {
-          newsImpactMultiplier = 1.2 + Math.random() * 0.8;
-        }
+        const newsImpactMultiplier = getNewsImpactMultiplier(currentNews.sentiment, difficultyFactor);
         const totalImpact = currentNews.impactPercent * newsImpactMultiplier;
         const targetPrice = Math.max(1, Number((currentPrice * (1 + totalImpact)).toFixed(2)));
         
@@ -412,16 +404,7 @@ export default function ActiveGame({
 
       // Pre-generate 11 points (6 impact + 5 cooldown)
       setGameState(prev => {
-        let newsImpactMultiplier = 1.0;
-        if (currentNews.sentiment === 'positive') {
-          // Boosted positive news impact for massive, exciting rallies
-          newsImpactMultiplier = 3.0 + Math.random() * 1.5;
-        } else if (currentNews.sentiment === 'negative') {
-          // Amplified downward drops for high-risk trading thrills
-          newsImpactMultiplier = 2.5 + Math.random() * 1.5;
-        } else {
-          newsImpactMultiplier = 1.2 + Math.random() * 0.8;
-        }
+        const newsImpactMultiplier = getNewsImpactMultiplier(currentNews.sentiment, difficultyFactor);
         const totalImpact = currentNews.impactPercent * newsImpactMultiplier;
         const targetPrice = Math.max(1, Number((currentPriceTmp * (1 + totalImpact)).toFixed(2)));
         
@@ -526,7 +509,7 @@ export default function ActiveGame({
       return;
     }
 
-    const nextComp = getRandomCompany(playedCompanyIds.current);
+    const nextComp = getRandomCompany(playedCompanyIds.current, minVolatility);
     playedCompanyIds.current.push(nextComp.id);
 
     // Initial graph history for new company
@@ -626,10 +609,20 @@ export default function ActiveGame({
     };
   }, [gameState.phase, tradingSubPhase]);
 
+  // Difficulty factor based on current cash (asymptotic curve)
+  const difficultyFactor = useMemo(
+    () => getDifficultyFactor(gameState.cash),
+    [gameState.cash]
+  );
+  const minVolatility = useMemo(
+    () => getMinVolatility(difficultyFactor),
+    [difficultyFactor]
+  );
+
   // Exit trigger to submit scoring
   const handleDoneGameOver = () => {
     if (settings.soundEnabled) playSound('click');
-    onFinishGame(gameState.cash, gameState.companiesTradedCount, gameState.roundNumber);
+    onFinishGame(gameState.cash, gameState.highestCashInSession, gameState.companiesTradedCount, gameState.roundNumber);
   };
 
   // Values calculation for rendering
@@ -710,7 +703,7 @@ export default function ActiveGame({
             <div className="text-left leading-none">
               <span className="text-[9px] font-mono uppercase tracking-wider text-slate-300 block">AVAILABLE CASH</span>
               <span id="label_bankroll" className="font-mono text-sm font-black text-yellow-350">
-                💵 ${gameState.cash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                💵 {formatMoney(gameState.cash)}
               </span>
             </div>
           </div>
@@ -748,6 +741,7 @@ export default function ActiveGame({
               #{gameState.roundNumber} <span className="text-[9px] text-yellow-400">({gameState.currentCompany.ticker})</span>
             </span>
           </div>
+
         </div>
       </div>
 
@@ -833,8 +827,8 @@ export default function ActiveGame({
                 <button
                   id="btn_abort_game"
                   onClick={() => {
-                    if (confirm('Exit back to main menu? Your ongoing progress will be stored.')) {
-                      onExitToMenu();
+                    if (confirm('End this run and save your score?')) {
+                      onExitGame(gameState.cash, gameState.highestCashInSession, gameState.companiesTradedCount, gameState.roundNumber);
                     }
                   }}
                   className="w-full text-center text-[10px] text-slate-400 hover:text-slate-600 hover:underline uppercase tracking-widest font-mono py-1 cursor-pointer"
@@ -1015,7 +1009,7 @@ export default function ActiveGame({
                       <div className="text-left">
                         <span className="text-[9px] text-slate-400 uppercase font-bold tracking-wider font-mono block mb-1">CURRENT SHARE VALUE</span>
                         <span className={`text-2xl sm:text-3xl font-black tracking-tighter font-mono block ${isProfit ? 'text-emerald-600' : 'text-rose-600'}`}>
-                          ${positionValue.toFixed(2)}
+                          {formatMoney(positionValue)}
                         </span>
                       </div>
                       
@@ -1042,7 +1036,7 @@ export default function ActiveGame({
                         <span className="mx-1">•</span>
                         <span>Gain: </span>
                         <strong className={`font-black ${isProfit ? 'text-emerald-600' : 'text-rose-600'}`}>
-                          {isProfit ? '+' : ''}${liveProfit.toFixed(2)}
+                          {formatMoney(liveProfit)}
                         </strong>
                       </div>
                     </div>
@@ -1063,64 +1057,21 @@ export default function ActiveGame({
                       className="space-y-3 w-full"
                     >
                       <div className="text-[10px] text-slate-500 font-mono font-bold text-center tracking-wider block">
-                        CHOOSE INITIAL BUY BLOCK CAPACITY:
+                        CHOOSE YOUR MOVE:
                       </div>
                       
-                      <div className="grid grid-cols-2 gap-2">
-                        {/* BUY $100 */}
-                        <button
-                          disabled={gameState.cash < 100}
-                          onClick={() => handleBuyTransaction(100)}
-                          className={`border-2 border-slate-800 font-black py-2 rounded-xl flex flex-col items-center justify-center text-xs transition-transform select-none active:translate-y-0.5 shadow-[2px_2px_0_0_#1e293b] ${
-                            gameState.cash >= 100
-                              ? 'bg-emerald-500 hover:bg-emerald-400 text-white cursor-pointer'
-                              : 'bg-slate-100 text-slate-400 opacity-40 cursor-not-allowed'
-                          }`}
-                        >
-                          <span className="text-[9px] font-mono opacity-80 uppercase tracking-widest">MINIMUM BLOCK</span>
-                          <span className="font-extrabold text-[13px]">💵 BUY $100</span>
-                        </button>
-
-                        {/* BUY $200 */}
-                        <button
-                          disabled={gameState.cash < 200}
-                          onClick={() => handleBuyTransaction(200)}
-                          className={`border-2 border-slate-800 font-black py-2 rounded-xl flex flex-col items-center justify-center text-xs transition-transform select-none active:translate-y-0.5 shadow-[2px_2px_0_0_#1e293b] ${
-                            gameState.cash >= 200
-                              ? 'bg-emerald-500 hover:bg-emerald-400 text-white cursor-pointer'
-                              : 'bg-slate-100 text-slate-400 opacity-40 cursor-not-allowed'
-                          }`}
-                        >
-                          <span className="text-[9px] font-mono opacity-80 uppercase tracking-widest">MID BLOCK</span>
-                          <span className="font-extrabold text-[13px]">💵 BUY $200</span>
-                        </button>
-
-                        {/* BUY $500 */}
-                        <button
-                          disabled={gameState.cash < 500}
-                          onClick={() => handleBuyTransaction(500)}
-                          className={`border-2 border-slate-800 font-black py-2 rounded-xl flex flex-col items-center justify-center text-xs transition-transform select-none active:translate-y-0.5 shadow-[2px_2px_0_0_#1e293b] ${
-                            gameState.cash >= 500
-                              ? 'bg-emerald-500 hover:bg-emerald-400 text-white cursor-pointer'
-                              : 'bg-slate-100 text-slate-400 opacity-40 cursor-not-allowed'
-                          }`}
-                        >
-                          <span className="text-[9px] font-mono opacity-80 uppercase tracking-widest">LARGE BLOCK</span>
-                          <span className="font-extrabold text-[13px]">💵 BUY $500</span>
-                        </button>
-
-                        {/* BUY MAX */}
+                      <div className="flex justify-center">
                         <button
                           disabled={gameState.cash <= 0}
                           onClick={() => handleBuyTransaction(gameState.cash)}
-                          className={`border-2 border-slate-800 font-black py-2 rounded-xl flex flex-col items-center justify-center text-xs transition-transform select-none active:translate-y-0.5 shadow-[2px_2px_0_0_#1e293b] ${
+                          className={`w-full border-2 border-slate-800 font-black py-3 rounded-xl flex flex-col items-center justify-center text-xs transition-transform select-none active:translate-y-0.5 shadow-[2px_2px_0_0_#1e293b] ${
                             gameState.cash > 0
-                              ? 'bg-amber-550 hover:bg-amber-500 bg-amber-500 text-white cursor-pointer'
+                              ? 'bg-amber-500 hover:bg-amber-400 text-white cursor-pointer'
                               : 'bg-slate-100 text-slate-400 opacity-40 cursor-not-allowed'
                           }`}
                         >
-                          <span className="text-[9px] font-mono opacity-80 uppercase tracking-widest font-extrabold">MAX LIQUIDITY</span>
-                          <span className="font-extrabold text-[13px]">🚀 ALL IN (${Math.floor(gameState.cash)})</span>
+                          <span className="text-[9px] font-mono opacity-80 uppercase tracking-widest font-extrabold">ALL IN</span>
+                          <span className="font-extrabold text-[13px]">🚀 BUY {formatMoney(gameState.cash)}</span>
                         </button>
                       </div>
                     </motion.div>
@@ -1246,7 +1197,7 @@ export default function ActiveGame({
                         <span className="text-[9px] text-slate-400 uppercase font-black tracking-wider">Holdings Value</span>
                         <span className="text-lg font-extrabold text-slate-100">
                           {gameState.position 
-                            ? `$${positionValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                            ? formatMoney(positionValue)
                             : '$0.00'
                           }
                         </span>
@@ -1260,7 +1211,7 @@ export default function ActiveGame({
                             {liveProfit > 0 ? <TrendingUp className="w-4 h-4 shrink-0" /> : liveProfit < 0 ? <TrendingDown className="w-4 h-4 shrink-0" /> : null}
                             {returnPercent !== 0 ? `${returnPercent.toFixed(1)}%` : '0.0%'}
                             <span className="text-xs opacity-75 ml-0.5">
-                              ({liveProfit >= 0 ? '+' : ''}${liveProfit.toFixed(0)})
+                              ({formatMoney(liveProfit)})
                             </span>
                           </span>
                         ) : (
@@ -1269,179 +1220,58 @@ export default function ActiveGame({
                       </div>
                     </div>
 
-                    {/* Controls Box: MAX Toggle + Adjustable Arrow Selectors */}
-                    <div className="bg-slate-950/80 border-2 border-slate-800 rounded-2xl p-3 space-y-3">
-                      
-                      {/* MAX Toggle Selector Header */}
-                      <div className="flex justify-end items-center pb-2 border-b border-slate-800">
+                    {/* Simple Casual Action Buttons — all in one row */}
+                    <div className="grid grid-cols-4 gap-1.5">
+                        {/* ALL IN */}
                         <button
                           type="button"
-                          onClick={() => {
-                            if (settings.soundEnabled) playSound('click');
-                            setIsMaxToggled(!isMaxToggled);
-                          }}
-                          className={`flex items-center gap-1 px-3 py-1 rounded-full text-[9px] font-mono font-black border transition-all cursor-pointer ${
-                            isMaxToggled 
-                              ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.4)]' 
-                              : 'bg-slate-850 text-slate-400 border-slate-700'
+                          disabled={gameState.cash < 1}
+                          onClick={() => { handleBuyTransaction(gameState.cash); }}
+                          className={`font-mono font-black text-[10px] py-2.5 rounded-xl flex items-center justify-center gap-1 transition-transform border-2 border-slate-800 shadow-[2px_2px_0_0_#1e293b] select-none active:translate-y-0.5 ${
+                            gameState.cash >= 1
+                              ? 'bg-emerald-500 hover:bg-emerald-450 text-white cursor-pointer'
+                              : 'bg-slate-800 text-slate-500 border-slate-800 opacity-40 cursor-not-allowed'
                           }`}
                         >
-                          <span>MAX TRANSACTION:</span>
-                          <span className="underline uppercase">{isMaxToggled ? 'ON' : 'OFF'}</span>
+                          🚀 BUY
                         </button>
-                      </div>
 
-                      {/* Adjuster Rows — Buy & Sell side by side */}
-                      <div className="grid grid-cols-2 gap-2.5">
-                        
-                        {/* BUY COLUMN */}
-                        <div className="flex flex-col gap-1.5 bg-slate-900/60 p-2 rounded-xl border border-slate-800">
-                          <div className="flex items-center justify-center gap-1">
-                            <button
-                              type="button"
-                              disabled={isMaxToggled || buyAmount <= 100}
-                              onClick={() => {
-                                if (settings.soundEnabled) playSound('click');
-                                setBuyAmount(prev => Math.max(100, prev - 100));
-                              }}
-                              className={`w-6 h-6 flex items-center justify-center rounded-lg border-2 border-slate-750 font-black text-[10px] select-none ${
-                                isMaxToggled || buyAmount <= 100 
-                                  ? 'bg-slate-850 text-slate-600 border-slate-800 opacity-40 cursor-not-allowed' 
-                                  : 'bg-slate-800 hover:bg-slate-700 active:scale-95 text-white cursor-pointer'
-                              }`}
-                            >
-                              ▼
-                            </button>
-                            
-                            <span className="text-xs font-mono font-black text-emerald-400 w-20 text-center">
-                              ${isMaxToggled ? Math.floor(gameState.cash).toLocaleString() : buyAmount}
-                            </span>
+                        {/* SELL ALL */}
+                        <button
+                          type="button"
+                          disabled={!gameState.position}
+                          onClick={() => {
+                            const maxVal = gameState.position ? gameState.position.shares * currentPrice : 0;
+                            handlePartialSellTransaction(maxVal);
+                          }}
+                          className={`font-mono font-black text-[10px] py-2.5 rounded-xl flex items-center justify-center gap-1 transition-transform border-2 border-slate-800 shadow-[2px_2px_0_0_#1e293b] select-none active:translate-y-0.5 ${
+                            gameState.position
+                              ? 'bg-rose-500 hover:bg-rose-450 text-white cursor-pointer'
+                              : 'bg-slate-800 text-slate-500 border-slate-800 opacity-40 cursor-not-allowed'
+                          }`}
+                        >
+                          💰 SELL
+                        </button>
 
-                            <button
-                              type="button"
-                              disabled={isMaxToggled || buyAmount >= gameState.cash}
-                              onClick={() => {
-                                if (settings.soundEnabled) playSound('click');
-                                setBuyAmount(prev => {
-                                  const next = prev + 100;
-                                  return Math.min(next, Math.floor(gameState.cash));
-                                });
-                              }}
-                              className={`w-6 h-6 flex items-center justify-center rounded-lg border-2 border-slate-750 font-black text-[10px] select-none ${
-                                isMaxToggled || buyAmount >= gameState.cash 
-                                  ? 'bg-slate-850 text-slate-600 border-slate-800 opacity-40 cursor-not-allowed' 
-                                  : 'bg-slate-800 hover:bg-slate-700 active:scale-95 text-white cursor-pointer'
-                              }`}
-                            >
-                              ▲
-                            </button>
-                          </div>
+                        {/* HOLD */}
+                        <button
+                          type="button"
+                          id="btn_news_hold"
+                          onClick={handleHoldAction}
+                          className="bg-slate-800 hover:bg-slate-750 border-2 border-slate-700 text-slate-100 font-mono font-black py-2.5 rounded-xl flex items-center justify-center gap-1 cursor-pointer text-[10px] active:translate-y-0.5 transition-transform shadow-[2px_2px_0_0_#1e293b]"
+                        >
+                          ✊ HOLD
+                        </button>
 
-                          <button
-                            type="button"
-                            disabled={gameState.cash < (isMaxToggled ? 1 : buyAmount)}
-                            onClick={() => {
-                              const finalBuy = isMaxToggled ? gameState.cash : buyAmount;
-                              handleBuyTransaction(finalBuy);
-                            }}
-                            className={`w-full font-mono font-black text-xs py-2 rounded-xl flex items-center justify-center gap-1 transition-transform border-2 border-slate-800 shadow-[1px_1px_0_0_#1e293b] select-none active:translate-y-0.5 ${
-                              gameState.cash >= (isMaxToggled ? 1 : buyAmount)
-                                ? 'bg-emerald-500 hover:bg-emerald-450 text-white cursor-pointer'
-                                : 'bg-slate-800 text-slate-500 border-slate-800 opacity-40 cursor-not-allowed'
-                            }`}
-                          >
-                            Buy
-                          </button>
-                        </div>
-
-                        {/* SELL COLUMN */}
-                        <div className="flex flex-col gap-1.5 bg-slate-900/60 p-2 rounded-xl border border-slate-800">
-                          <div className="flex items-center justify-center gap-1">
-                            <button
-                              type="button"
-                              disabled={isMaxToggled || !gameState.position || sellAmount <= 100}
-                              onClick={() => {
-                                if (settings.soundEnabled) playSound('click');
-                                setSellAmount(prev => Math.max(100, prev - 100));
-                              }}
-                              className={`w-6 h-6 flex items-center justify-center rounded-lg border-2 border-slate-750 font-black text-[10px] select-none ${
-                                isMaxToggled || !gameState.position || sellAmount <= 100 
-                                  ? 'bg-slate-850 text-slate-600 border-slate-800 opacity-40 cursor-not-allowed' 
-                                  : 'bg-slate-800 hover:bg-slate-700 active:scale-95 text-white cursor-pointer'
-                              }`}
-                            >
-                              ▼
-                            </button>
-                            
-                            <span className="text-xs font-mono font-black text-rose-400 w-20 text-center">
-                              ${isMaxToggled 
-                                ? (gameState.position ? Math.floor(gameState.position.shares * currentPrice).toLocaleString() : 0) 
-                                : sellAmount}
-                            </span>
-
-                            <button
-                              type="button"
-                              disabled={isMaxToggled || !gameState.position || sellAmount >= (gameState.position.shares * currentPrice)}
-                              onClick={() => {
-                                if (settings.soundEnabled) playSound('click');
-                                const maxVal = gameState.position ? gameState.position.shares * currentPrice : 0;
-                                setSellAmount(prev => {
-                                  const next = prev + 100;
-                                  return Math.min(next, Math.floor(maxVal));
-                                });
-                              }}
-                              className={`w-6 h-6 flex items-center justify-center rounded-lg border-2 border-slate-750 font-black text-[10px] select-none ${
-                                isMaxToggled || !gameState.position || sellAmount >= (gameState.position.shares * currentPrice) 
-                                  ? 'bg-slate-850 text-slate-600 border-slate-800 opacity-40 cursor-not-allowed' 
-                                  : 'bg-slate-800 hover:bg-slate-700 active:scale-95 text-white cursor-pointer'
-                              }`}
-                            >
-                              ▲
-                            </button>
-                          </div>
-
-                          <button
-                            type="button"
-                            disabled={!gameState.position}
-                            onClick={() => {
-                              const maxVal = gameState.position ? gameState.position.shares * currentPrice : 0;
-                              const finalSell = isMaxToggled ? maxVal : sellAmount;
-                              handlePartialSellTransaction(finalSell);
-                            }}
-                            className={`w-full font-mono font-black text-xs py-2 rounded-xl flex items-center justify-center gap-1 transition-transform border-2 border-slate-800 shadow-[1px_1px_0_0_#1e293b] select-none active:translate-y-0.5 ${
-                              gameState.position
-                                ? 'bg-rose-500 hover:bg-rose-450 text-white cursor-pointer'
-                                : 'bg-slate-800 text-slate-500 border-slate-800 opacity-40 cursor-not-allowed'
-                            }`}
-                          >
-                            Sell
-                          </button>
-                        </div>
-
-                      </div>
-                    </div>
-
-                    {/* Footer Auxiliary Action Row */}
-                    <div className="grid grid-cols-2 gap-2.5 pt-1">
-                      {/* HOLD Button */}
-                      <button
-                        type="button"
-                        id="btn_news_hold"
-                        onClick={handleHoldAction}
-                        className="w-full bg-slate-800 hover:bg-slate-750 border-2 border-slate-700 text-slate-100 font-mono font-black py-2.5 rounded-xl flex items-center justify-center gap-1 cursor-pointer text-xs active:translate-y-0.5 transition-transform shadow-[2px_2px_0_0_#1e293b]"
-                      >
-                        ✊ HOLD POSITION
-                      </button>
-
-                      {/* CASH OUT / END TRADE Button */}
-                      <button
-                        type="button"
-                        id="btn_news_sell_all"
-                        onClick={handleSellTransaction}
-                        className="w-full bg-amber-500 hover:bg-amber-450 text-slate-950 font-mono font-black text-xs py-2.5 border-2 border-slate-800 rounded-xl flex items-center justify-center gap-1 cursor-pointer transition-transform active:translate-y-0.5 shadow-[2px_2px_0_0_#1e293b]"
-                      >
-                        💵 {gameState.position ? 'CASH OUT' : 'END TRADE'}
-                      </button>
+                        {/* CASH OUT */}
+                        <button
+                          type="button"
+                          id="btn_news_sell_all"
+                          onClick={handleSellTransaction}
+                          className="bg-amber-500 hover:bg-amber-450 text-slate-950 font-mono font-black text-[10px] py-2.5 border-2 border-slate-800 rounded-xl flex items-center justify-center gap-1 cursor-pointer transition-transform active:translate-y-0.5 shadow-[2px_2px_0_0_#1e293b]"
+                        >
+                          💵 OUT
+                        </button>
                     </div>
 
                   </motion.div>
@@ -1558,7 +1388,7 @@ export default function ActiveGame({
 
               <div className="bg-yellow-50 rounded-xl p-3 border border-yellow-200">
                 <p className="text-[10px] text-slate-600 font-mono">
-                  New Capital Balance: <strong className="text-slate-800 font-black">${gameState.cash.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong>
+                  New Capital Balance: <strong className="text-slate-800 font-black">{formatMoney(gameState.cash)}</strong>
                 </p>
               </div>
 
@@ -1617,7 +1447,7 @@ export default function ActiveGame({
                 </div>
                 <div className="flex justify-between text-slate-500 font-bold">
                   <span>Peak Bankroll Achieved:</span>
-                  <span className="font-extrabold text-emerald-600">${gameState.highestCashInSession.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  <span className="font-extrabold text-emerald-600">{formatMoney(gameState.highestCashInSession)}</span>
                 </div>
                 <div className="border-t border-slate-200 pt-2.5 flex justify-between items-center">
                   <span className="font-extrabold text-slate-800">Rank Level:</span>

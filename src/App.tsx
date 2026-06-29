@@ -1,9 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { Run, GameSettings } from './types';
+import { useState, useEffect } from 'react';
+import { Run, GameSettings, GameRecord, START_CASH } from './types';
 import MainMenu from './components/MainMenu';
 import ActiveGame from './components/ActiveGame';
-import { playSound } from './utils/audio';
-import { Sparkles, Coins, Gamepad2, Laptop, Smartphone } from 'lucide-react';
+import { loadRecords, updateRecordsAfterRun } from './utils/records';
 
 const RUNS_STORAGE_KEY = 'cointrader_runs_v2';
 const SETTINGS_STORAGE_KEY = 'cointrader_settings';
@@ -11,8 +10,6 @@ const SETTINGS_STORAGE_KEY = 'cointrader_settings';
 const DEFAULT_SETTINGS: GameSettings = {
   soundEnabled: true,
   hapticEnabled: true,
-  startCash: 1000,
-  chartSpeed: 'normal'
 };
 
 export default function App() {
@@ -24,6 +21,9 @@ export default function App() {
   // Game custom settings state
   const [settings, setSettings] = useState<GameSettings>(DEFAULT_SETTINGS);
 
+  // All-time records state
+  const [records, setRecords] = useState<GameRecord>(loadRecords);
+
   // Load state from localStorage on mount
   useEffect(() => {
     try {
@@ -34,9 +34,9 @@ export default function App() {
       
       const storedSettings = localStorage.getItem(SETTINGS_STORAGE_KEY);
       if (storedSettings) {
-        setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(storedSettings), startCash: 1000 });
+        setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(storedSettings) });
       } else {
-        setSettings({ ...DEFAULT_SETTINGS, startCash: 1000 });
+        setSettings(DEFAULT_SETTINGS);
       }
     } catch (e) {
       console.error('Failed to load local storage:', e);
@@ -45,10 +45,9 @@ export default function App() {
 
   // Save settings helper
   const handleUpdateSettings = (newSettings: GameSettings) => {
-    const updated = { ...newSettings, startCash: 1000 };
-    setSettings(updated);
+    setSettings(newSettings);
     try {
-      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(updated));
+      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(newSettings));
     } catch (e) {
       console.error('Failed to set settings:', e);
     }
@@ -69,17 +68,22 @@ export default function App() {
     setCurrentView('game');
   };
 
-  // Session complete (ran out of Cash/finished successfully)
-  const handleFinishGame = (finalCash: number, companiesTraded: number, roundsPlayed: number) => {
-    // Determine funny unlocked rank title based on balance
+  // Session complete (ran out of Cash / voluntarily exited)
+  const handleFinishGame = (
+    finalCash: number,
+    highestCash: number,
+    companiesTraded: number,
+    roundsPlayed: number
+  ) => {
+    // Determine funny unlocked rank title based on peak balance
     let unlockedTitle = '🐹 Apprentice';
-    if (finalCash >= 10000) {
+    if (highestCash >= 10000) {
       unlockedTitle = '👑 Giga Whale';
-    } else if (finalCash >= 5000) {
+    } else if (highestCash >= 5000) {
       unlockedTitle = '💎 Pro Trader';
-    } else if (finalCash >= 2500) {
+    } else if (highestCash >= 2500) {
       unlockedTitle = '🦁 Boba Baron';
-    } else if (finalCash >= 1000) {
+    } else if (highestCash >= 1000) {
       unlockedTitle = '🥑 Avocado Tycoon';
     } else if (finalCash > 0) {
       unlockedTitle = '🍕 Pizza Earn';
@@ -96,7 +100,7 @@ export default function App() {
         minute: '2-digit'
       }),
       finalCash,
-      highestCash: finalCash, // simplified tracking
+      highestCash,
       companiesTradedCount: companiesTraded,
       roundsPlayed: Math.max(0, roundsPlayed - 1),
       unlockedTitle
@@ -110,11 +114,21 @@ export default function App() {
       console.error('Failed to save run record:', e);
     }
 
+    // Update all-time records
+    const updatedRecords = updateRecordsAfterRun(newRun);
+    setRecords(updatedRecords);
+
     setCurrentView('menu');
   };
 
-  const handleExitToMenu = () => {
-    setCurrentView('menu');
+  // Voluntary mid-game exit — still records the run
+  const handleExitGame = (
+    finalCash: number,
+    highestCash: number,
+    companiesTraded: number,
+    roundsPlayed: number
+  ) => {
+    handleFinishGame(finalCash, highestCash, companiesTraded, roundsPlayed);
   };
 
   return (
@@ -155,13 +169,14 @@ export default function App() {
                 onClearHistory={handleClearHistory}
                 settings={settings}
                 onUpdateSettings={handleUpdateSettings}
+                records={records}
               />
             ) : (
               <ActiveGame
                 settings={settings}
                 runsCount={runs.length}
                 onFinishGame={handleFinishGame}
-                onExitToMenu={handleExitToMenu}
+                onExitGame={handleExitGame}
               />
             )}
           </div>
