@@ -779,10 +779,10 @@ export default function ActiveGame({
 
                 {/* Company Name, Ticker and Big Title */}
                 <div className="text-center bg-yellow-50 rounded-[20px] p-4 border-2 border-dashed border-slate-350 relative">
-                  <span className="absolute -top-3 left-1/2 transform -translate-x-1/2 text-[10px] bg-yellow-400 border-2 border-slate-800 text-slate-800 font-black font-mono px-3 py-0.5 rounded-full shadow-[2px_2px_0_0_#1e293b]">
+                  <span className="absolute -top-3 left-1/2 transform -translate-x-1/2 text-sm bg-yellow-400 border-2 border-slate-800 text-slate-800 font-black font-mono px-3 py-0.5 rounded-full shadow-[2px_2px_0_0_#1e293b]">
                     ${gameState.currentCompany.ticker}
                   </span>
-                  <p className="text-lg font-black mt-2 text-slate-800 font-sans tracking-tight leading-snug">
+                  <p className="text-2xl font-black mt-2 text-slate-800 font-sans tracking-tight leading-snug">
                     {gameState.currentCompany.name}
                   </p>
                   <div className={`mt-1.5 font-mono text-[9px] uppercase font-bold px-2 py-0.5 rounded-lg border inline-block ${volConfig.color.replace('border-emerald-300', 'border-slate-800').replace('border-blue-300', 'border-slate-800').replace('border-amber-300', 'border-slate-800').replace('border-red-300', 'border-slate-800')}`}>
@@ -873,16 +873,14 @@ export default function ActiveGame({
                   <div className="w-2 h-2" />
                 )}
                 
-                <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-widest">
-                  {tradingSubPhase === 'idle' ? 'PRE-TRADE ANALYSIS' : 'LIVE PIPELINE'}
-                </span>
+                <div className="w-2 h-2" />
               </div>
 
               {/* Trading Sub-HUD for stock details */}
               <div className="flex justify-between items-center bg-slate-50 px-3 py-2 border-2 border-slate-800 rounded-xl font-mono shadow-[2px_2px_0_0_#1e293b]">
                 <div className="text-left">
-                  <span className="text-[8px] text-slate-400 font-bold uppercase block truncate max-w-[130px]">{gameState.currentCompany.name}</span>
-                  <span className="text-[10px] bg-yellow-400 border border-slate-800 font-extrabold px-1.5 py-0.2 rounded font-mono text-slate-800">
+                  <span className="text-sm text-slate-700 font-bold uppercase block truncate max-w-[180px]">{gameState.currentCompany.name}</span>
+                  <span className="text-sm bg-yellow-400 border border-slate-800 font-extrabold px-1.5 py-0.5 rounded font-mono text-slate-800">
                     ${gameState.currentCompany.ticker}
                   </span>
                 </div>
