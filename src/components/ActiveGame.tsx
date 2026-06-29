@@ -151,6 +151,7 @@ export default function ActiveGame({
     setUsedNewsIds(new Set());
     setActivePointIndex(9);
     setTransactions([]);
+    setActionsRemaining(10);
 
     setGameState(prev => ({
       ...prev,
@@ -546,6 +547,7 @@ export default function ActiveGame({
     setUsedNewsIds(new Set());
     setActivePointIndex(9);
     setTransactions([]);
+    setActionsRemaining(10);
 
     setGameState(prev => ({
       ...prev,
@@ -724,7 +726,7 @@ export default function ActiveGame({
 
         <div className="flex items-center gap-3">
           <div className="text-right leading-none border-r border-slate-700 pr-3">
-            <span className="text-[9px] font-mono tracking-wider uppercase text-slate-300 block">KEYS LEFT</span>
+            <span className="text-[9px] font-mono tracking-wider uppercase text-slate-300 block">ACTIONS LEFT</span>
             <div className="flex items-center gap-1.5 justify-end">
               <span className={`font-mono font-black text-xs ${actionsRemaining <= 2 ? 'text-red-400 animate-pulse' : 'text-yellow-400'}`}>
                 🔑 {actionsRemaining}/10
@@ -741,7 +743,7 @@ export default function ActiveGame({
             </div>
           </div>
           <div className="text-right leading-none">
-            <span className="text-[9px] font-mono tracking-wider uppercase text-slate-300 block">LEVEL / ROUND</span>
+            <span className="text-[9px] font-mono tracking-wider uppercase text-slate-300 block">ROUND</span>
             <span className="font-mono font-black text-xs text-slate-100">
               #{gameState.roundNumber} <span className="text-[9px] text-yellow-400">({gameState.currentCompany.ticker})</span>
             </span>
@@ -1465,7 +1467,7 @@ export default function ActiveGame({
                 >
                   <span className="flex items-center gap-1.5 text-[11px] tracking-wide">
                     <Newspaper className="w-4 h-4 shrink-0 text-yellow-300" />
-                    🚨 BREAKING NEWS INCOMING!
+                    🚨  INSIDER TIP INCOMING!
                   </span>
                   <span className="bg-slate-900 border-2 border-slate-800 text-yellow-300 text-[10px] font-black px-2.5 py-1 rounded-lg">
                     NEXT ➜
@@ -1491,7 +1493,7 @@ export default function ActiveGame({
                 >
                   <span className="flex items-center gap-1.5 text-[11px] tracking-wide">
                     <Newspaper className="w-4 h-4 shrink-0 text-yellow-300" />
-                    🚨 PENDING BREAKING NEWS ALERT!
+                    🚨 PENDING INSIDER TIP!
                   </span>
                   <span className="bg-slate-900 border-2 border-slate-800 text-yellow-300 text-[10px] font-black px-2.5 py-1 rounded-lg">
                     EXPAND ➕
@@ -1527,7 +1529,7 @@ export default function ActiveGame({
 
               <div>
                 <span className="text-[9px] font-mono bg-slate-100 text-slate-500 border border-slate-200 rounded-full px-3 py-1 font-extrabold uppercase">
-                  LEVEL #{gameState.roundNumber} COMPLETED
+                  ROUND #{gameState.roundNumber} COMPLETED
                 </span>
                 <h3 className="text-xl font-black mt-3 text-slate-800 leading-tight uppercase font-sans">
                   {gameState.lastRoundProfit >= 0 ? 'LIQUIDITY CLAIMED!' : 'TRADE SETTLED'}
@@ -1681,8 +1683,8 @@ export default function ActiveGame({
               {/* Stats Box */}
               <div className="grid grid-cols-2 gap-2 bg-slate-900 text-white rounded-2xl p-3 font-mono text-xs border-2 border-slate-800">
                 <div className="text-left">
-                  <p className="text-[8px] text-slate-400 uppercase font-bold mb-0.5">Access Keys</p>
-                  <p className="font-black text-yellow-400">{actionsRemaining} / 10 Keys</p>
+                  <p className="text-[8px] text-slate-400 uppercase font-bold mb-0.5">Actions</p>
+                  <p className="font-black text-yellow-400">{actionsRemaining} / 10 Actions</p>
                 </div>
                 <div className="text-right border-l border-slate-800 pl-3">
                   <p className="text-[8px] text-slate-400 uppercase font-bold mb-0.5">Off-market Gems</p>
@@ -1749,7 +1751,7 @@ export default function ActiveGame({
                     <p className="text-[9px] text-slate-400 font-mono mt-0.5 font-medium leading-none">
                       {freeBribeCooldown > 0 
                         ? `Contact cooling down: ${freeBribeCooldown}s` 
-                        : 'Free contact request (+5 Keys)'}
+                        : 'Free contact request (+5 Actions)'}
                     </p>
                   </div>
                   <button

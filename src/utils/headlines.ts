@@ -1,4 +1,5 @@
 import { Company } from '../types';
+import { EXTRA_HEADLINE_TEMPLATES } from '../extraHeadlines';
 
 export interface NewsHeadline {
   text: string;
@@ -371,8 +372,8 @@ export function getCompanyKeywords(company: Company): CompanyKeywords {
 }
 
 // 50 unique headlines templates (20 positive, 20 negative, 10 neutral)
-const HEADLINE_TEMPLATES: { text: string; sentiment: 'positive' | 'negative' | 'neutral'; impactPercent: number; sourceOffset: number }[] = [
-  // POSITIVE (Indices 0 - 19)
+const BASE_HEADLINE_TEMPLATES: { text: string; sentiment: 'positive' | 'negative' | 'neutral'; impactPercent: number; sourceOffset: number }[] = [
+  // ...existing code...
   { text: "{NAME} unveils revolutionary new {PRODUCT}, driving retail interest to historical highs!", sentiment: 'positive', impactPercent: 0.38, sourceOffset: 0 },
   { text: "{NAME} secures exclusive multi-million dollar contract to distribute their premium {PRODUCT}.", sentiment: 'positive', impactPercent: 0.28, sourceOffset: 1 },
   { text: "{NAME} reports record-shattering quarterly earnings, fueled by massive sales of {PRODUCT}.", sentiment: 'positive', impactPercent: 0.35, sourceOffset: 2 },
@@ -428,6 +429,9 @@ const HEADLINE_TEMPLATES: { text: string; sentiment: 'positive' | 'negative' | '
   { text: "Global commodities index rebalances; {TICKER} weight remains unchanged.", sentiment: 'neutral', impactPercent: 0.0, sourceOffset: 8 },
   { text: "CEO of {NAME} seen dining with the founder of direct competitor {RIVAL}.", sentiment: 'neutral', impactPercent: 0.03, sourceOffset: 9 }
 ];
+
+// Combine base templates with the 500 extra templates for a total of 550 headlines per company.
+const HEADLINE_TEMPLATES = [...BASE_HEADLINE_TEMPLATES, ...EXTRA_HEADLINE_TEMPLATES];
 
 export function generate50HeadlinesForCompany(company: Company): NewsHeadline[] {
   const keywords = getCompanyKeywords(company);

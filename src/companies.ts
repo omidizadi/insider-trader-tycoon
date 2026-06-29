@@ -1,4 +1,5 @@
 import { Company } from './types';
+import { EXTRA_COMPANIES } from './extraCompanies';
 
 export const BASE_CUTE_COMPANIES: Company[] = [
   {
@@ -258,7 +259,7 @@ const build150Companies = (): Company[] => {
   return list;
 };
 
-export const CUTE_COMPANIES: Company[] = build150Companies();
+export const CUTE_COMPANIES: Company[] = [...build150Companies(), ...EXTRA_COMPANIES];
 
 export function getRandomCompany(playedIds: string[]): Company {
   const unplayed = CUTE_COMPANIES.filter(c => !playedIds.includes(c.id));
