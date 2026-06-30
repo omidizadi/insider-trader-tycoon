@@ -6,15 +6,15 @@ import {
 } from 'lucide-react';
 import {
   Company, GameSessionState, GameSettings, TradePosition, START_CASH,
-  NewsHeadline, MAGNITUDE_META, RuleCard, RoundEvalContext
+  NewsHeadline, MAGNITUDE_META, RuleCard, RoundEvalContext, RoundScript
 } from '../types';
 import { getRandomCompany } from '../companies';
 import { playSound } from '../utils/audio';
-import { pickRandomHeadline } from '../utils/headlines';
-import { getDifficultyFactor, getMinVolatility, getNewsImpactMultiplier } from '../utils/difficulty';
 import { pickRuleChoices } from '../data/rules';
 import { getRound } from '../data/rounds';
 import { resolveBotAction, BotContext } from '../utils/botEngine';
+import { generateRoundScript } from '../utils/priceEngine';
+import { detectCombos, getComboProgress, isComboComplete } from '../utils/combos';
 
 interface ActiveGameProps {
   settings: GameSettings;
@@ -29,6 +29,8 @@ const TICKS_PER_ROUND = 12;
 const RULE_HAND_SIZE = 8;
 // Number of rules the player equips.
 const RULE_EQUIP_SIZE = 5;
+// Number of initial history points.
+const HISTORY_LENGTH = 8;
 
 type LogEntry =
   | { kind: 'news'; news: NewsHeadline; tick: number }
@@ -49,6 +51,8 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
     lastRoundProfit: 0,
     lastRoundEvalContext: null,
     lastRoundPassed: false,
+    roundScript: null,
+    previewScript: null,
   }));
 
   // Rule selection hand for the current round.
@@ -66,8 +70,6 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
   const [biggestTradeProfit, setBiggestTradeProfit] = useState(0);
   // Trades count this round.
   const [tradesCount, setTradesCount] = useState(0);
-  // Used news ids to avoid repeats.
-  const [usedNewsIds, setUsedNewsIds] = useState<Set<string>>(() => new Set());
   // The most recent bot action highlight.
   const [lastBotAction, setLastBotAction] = useState<{ action: 'buy' | 'sell' | 'hold'; rule: RuleCard | null } | null>(null);
   // Guard so the round-end evaluation only runs once per round.
@@ -82,21 +84,21 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
   const playedCompanyIds = useRef<string[]>([]);
 
   // Refs to read latest values inside the interval without re-subscribing.
-  const newsSeenRef = useRef(newsSeen);
   const roundHighRef = useRef(roundHigh);
   const roundLowRef = useRef(roundLow);
   const biggestTradeProfitRef = useRef(biggestTradeProfit);
   const tradesCountRef = useRef(tradesCount);
-  const usedNewsIdsRef = useRef(usedNewsIds);
+  const newsSeenRef = useRef(newsSeen);
+  const logRef = useRef(log);
   const selectedRulesRef = useRef(gameState.selectedRules);
   const roundStartCashRef = useRef(gameState.roundStartCash);
   const currentRoundNumberRef = useRef(gameState.roundNumber);
-  useEffect(() => { newsSeenRef.current = newsSeen; }, [newsSeen]);
   useEffect(() => { roundHighRef.current = roundHigh; }, [roundHigh]);
   useEffect(() => { roundLowRef.current = roundLow; }, [roundLow]);
   useEffect(() => { biggestTradeProfitRef.current = biggestTradeProfit; }, [biggestTradeProfit]);
   useEffect(() => { tradesCountRef.current = tradesCount; }, [tradesCount]);
-  useEffect(() => { usedNewsIdsRef.current = usedNewsIds; }, [usedNewsIds]);
+  useEffect(() => { newsSeenRef.current = newsSeen; }, [newsSeen]);
+  useEffect(() => { logRef.current = log; }, [log]);
   useEffect(() => { selectedRulesRef.current = gameState.selectedRules; }, [gameState.selectedRules]);
   useEffect(() => { roundStartCashRef.current = gameState.roundStartCash; }, [gameState.roundStartCash]);
   useEffect(() => { currentRoundNumberRef.current = gameState.roundNumber; }, [gameState.roundNumber]);
@@ -112,57 +114,47 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
     return `${sign}$${abs.toFixed(2)}`;
   };
 
-  const difficultyFactor = useMemo(() => getDifficultyFactor(gameState.cash), [gameState.cash]);
-  const minVolatility = useMemo(() => getMinVolatility(difficultyFactor), [difficultyFactor]);
   const currentRound = getRound(gameState.roundNumber);
-
-  // Generate initial price history for a company.
-  const generateHistory = (company: Company): number[] => {
-    const history: number[] = [];
-    let curPrice = company.basePrice;
-    for (let i = 0; i < 8; i++) {
-      const change = curPrice * (Math.random() * company.volatility * 0.4 - company.volatility * 0.18 + company.trend * 0.2);
-      curPrice = Math.max(1, Number((curPrice + change).toFixed(2)));
-      history.push(curPrice);
-    }
-    return history;
-  };
 
   // ===== PHASE: round_intro → stock_select =====
   const handleStartRound = () => {
     if (settings.soundEnabled) playSound('click');
-    const comp = getRandomCompany(playedCompanyIds.current, minVolatility);
+    const comp = getRandomCompany(playedCompanyIds.current);
+    const script = generateRoundScript(comp, gameState.roundNumber, HISTORY_LENGTH, TICKS_PER_ROUND);
     setPreviewCompany(comp);
-    setGameState(prev => ({ ...prev, phase: 'stock_select' }));
+    setGameState(prev => ({ ...prev, phase: 'stock_select', previewScript: script }));
   };
 
   // Skip the previewed stock and roll a new one.
   const handleSkipStock = () => {
     if (settings.soundEnabled) playSound('skip');
-    const comp = getRandomCompany(playedCompanyIds.current, minVolatility);
+    const comp = getRandomCompany(playedCompanyIds.current);
+    const script = generateRoundScript(comp, gameState.roundNumber, HISTORY_LENGTH, TICKS_PER_ROUND);
     setPreviewCompany(comp);
+    setGameState(prev => ({ ...prev, previewScript: script }));
   };
 
   // ===== PHASE: stock_select → rule_select =====
   const handlePickStock = () => {
-    if (!previewCompany) return;
+    if (!previewCompany || !gameState.previewScript) return;
     if (settings.soundEnabled) playSound('click');
     const nextComp = previewCompany;
     playedCompanyIds.current.push(nextComp.id);
-    const history = generateHistory(nextComp);
+    const script = gameState.previewScript;
 
     setGameState(prev => ({
       ...prev,
       currentCompany: nextComp,
-      chartPoints: history,
+      chartPoints: script.prices.slice(0, script.historyLength),
       position: null,
       phase: 'rule_select',
       companiesTradedCount: prev.companiesTradedCount + 1,
+      roundScript: script,
     }));
 
     setRuleHand(pickRuleChoices(RULE_HAND_SIZE, [], gameState.selectedRules.map(r => r.id)));
-    setRoundHigh(history[history.length - 1]);
-    setRoundLow(history[history.length - 1]);
+    setRoundHigh(script.prices[script.historyLength - 1]);
+    setRoundLow(script.prices[script.historyLength - 1]);
   };
 
   // Shuffle unselected cards in the rule hand (costs 1 charge, 3 per run).
@@ -190,28 +182,12 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
     setNewsSeen([]);
     setBiggestTradeProfit(0);
     setTradesCount(0);
-    setUsedNewsIds(new Set());
     setLastBotAction(null);
     setRoundEnded(false);
   };
 
-  // Generate the next price point given the company + optional news impact.
-  const generateNextPrice = (company: Company, currentPrice: number, news?: NewsHeadline | null): number => {
-    let change: number;
-    if (news) {
-      const mult = getNewsImpactMultiplier(news.sentiment, difficultyFactor);
-      const totalImpact = news.impactPercent * mult;
-      const target = Math.max(1, currentPrice * (1 + totalImpact));
-      // Move ~40% of the way to the target each tick (impact unfolds over several ticks).
-      change = (target - currentPrice) * 0.4;
-    } else {
-      change = currentPrice * (Math.random() * company.volatility * 0.12 - company.volatility * 0.06 + company.trend * 0.04);
-    }
-    return Math.max(1, Number((currentPrice + change).toFixed(2)));
-  };
-
   // ===== THE TRADING LOOP =====
-  // Each tick: maybe generate news, advance price, resolve bot action, log.
+  // Each tick: read from the pre-generated round script, resolve bot action, log.
   useEffect(() => {
     if (gameState.phase !== 'trading') return;
     if (roundEnded) return;
@@ -226,24 +202,23 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
           if (!prev.currentCompany) return prev;
           const curPrice = prev.chartPoints[prev.chartPoints.length - 1] || prev.currentCompany.basePrice;
 
-          // Maybe generate news (every 2 ticks, starting tick 1).
-          let news: NewsHeadline | null = null;
-          if (nextTick % 2 === 1) {
-            const { headline, id } = pickRandomHeadline(prev.currentCompany!, usedNewsIdsRef.current);
-            setUsedNewsIds(prevSet => {
-              const copy = new Set(prevSet);
-              copy.add(id);
-              return copy;
-            });
-            news = headline;
-            setNewsSeen(prevNews => [headline, ...prevNews]);
-            setLog(prevLog => [...prevLog, { kind: 'news', news: headline, tick: nextTick }]);
+          // Read from the pre-generated round script.
+          const script = prev.roundScript;
+          if (!script) return prev;
+
+          // Get the pre-generated price for this tick.
+          const nextPrice = script.prices[script.historyLength + nextTick - 1] ?? curPrice;
+          const nextPoints = [...prev.chartPoints, nextPrice];
+
+          // Get the pre-generated news event (if any) for this tick.
+          const newsEvent = script.newsEvents[nextTick - 1];
+          const news = newsEvent?.news ?? null;
+          if (news) {
+            setNewsSeen(prevNews => [news, ...prevNews]);
+            setLog(prevLog => [...prevLog, { kind: 'news', news, tick: nextTick }]);
             if (settings.soundEnabled) playSound('click');
           }
 
-          // Generate next price.
-          const nextPrice = generateNextPrice(prev.currentCompany, curPrice, news);
-          const nextPoints = [...prev.chartPoints, nextPrice];
           setRoundHigh(h => Math.max(h, nextPrice));
           setRoundLow(l => (l === 0 ? nextPrice : Math.min(l, nextPrice)));
 
@@ -260,6 +235,7 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
             totalTicks: TICKS_PER_ROUND,
             allTimeHigh: Math.max(roundHighRef.current, nextPrice),
             allTimeLow: roundLowRef.current === 0 ? nextPrice : Math.min(roundLowRef.current, nextPrice),
+            cardsFiredThisRound: logRef.current.filter(e => e.kind === 'action' && e.action !== 'hold').length,
           };
 
           const { action, firedRule } = resolveBotAction(selectedRulesRef.current, botCtx);
@@ -587,6 +563,65 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
                       {previewCompany.summary}
                     </p>
                   </div>
+
+                  {/* Chart Preview — shows the exact future price path */}
+                  {gameState.previewScript && (() => {
+                    const pts = gameState.previewScript.prices;
+                    const previewW = 340, previewH = 140, previewPad = 16;
+                    const minVal = Math.min(...pts) * 0.95;
+                    const maxVal = Math.max(...pts) * 1.05;
+                    const valueRange = maxVal - minVal === 0 ? 1 : maxVal - minVal;
+                    const coords = pts.map((p, i) => ({
+                      x: previewPad + (i / Math.max(1, pts.length - 1)) * (previewW - previewPad * 2),
+                      y: previewH - previewPad - ((p - minVal) / valueRange) * (previewH - previewPad * 2),
+                    }));
+                    let pathD = `M ${coords[0].x} ${coords[0].y}`;
+                    for (let i = 1; i < coords.length; i++) pathD += ` L ${coords[i].x} ${coords[i].y}`;
+                    const fillD = `${pathD} L ${coords[coords.length - 1].x} ${previewH - previewPad} L ${coords[0].x} ${previewH - previewPad} Z`;
+                    const first = pts[0], last = pts[pts.length - 1];
+                    const chartStroke = last >= first ? '#10b981' : '#f43f5e';
+                    const histLen = gameState.previewScript.historyLength;
+                    const newsCoords = gameState.previewScript.newsEvents
+                      .map((ev, i) => ev ? coords[histLen + i] : null)
+                      .filter(Boolean) as { x: number; y: number }[];
+                    return (
+                      <div className="bg-slate-900 border-4 border-slate-800 rounded-[24px] p-2 relative shadow-inner">
+                        <div className="flex items-center justify-between px-1 pb-1">
+                          <span className="text-[8px] text-slate-400 font-mono tracking-widest uppercase font-bold">
+                            📊 PRICE PREVIEW (exact future)
+                          </span>
+                          <span className={`text-[8px] font-mono font-bold ${chartStroke === '#10b981' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {last >= first ? '▲' : '▼'} {formatMoney(last)}
+                          </span>
+                        </div>
+                        <svg viewBox={`0 0 ${previewW} ${previewH}`} className="w-full h-[120px] overflow-visible">
+                          <defs>
+                            <linearGradient id="previewGrad" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor={chartStroke} stopOpacity="0.35" />
+                              <stop offset="100%" stopColor={chartStroke} stopOpacity="0.0" />
+                            </linearGradient>
+                          </defs>
+                          <path d={fillD} fill="url(#previewGrad)" />
+                          <path d={pathD} fill="none" stroke={chartStroke} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                          {/* History / trading divider line */}
+                          {coords[histLen - 1] && (
+                            <line x1={coords[histLen - 1].x} y1={previewPad} x2={coords[histLen - 1].x} y2={previewH - previewPad} stroke="#94a3b8" strokeWidth="1" strokeDasharray="4 3" opacity="0.5" />
+                          )}
+                          {/* News event dots */}
+                          {newsCoords.map((c, i) => (
+                            <circle key={`news_dot_${i}`} cx={c.x} cy={c.y} r="3" fill="#fbbf24" stroke="#fff" strokeWidth="1" opacity="0.8" />
+                          ))}
+                          {/* Start and end markers */}
+                          <circle cx={coords[0].x} cy={coords[0].y} r="4" fill="#94a3b8" stroke="#fff" strokeWidth="1.5" />
+                          <circle cx={coords[coords.length - 1].x} cy={coords[coords.length - 1].y} r="4" fill={chartStroke} stroke="#fff" strokeWidth="1.5" />
+                        </svg>
+                        <div className="flex justify-between px-1 pt-0.5">
+                          <span className="text-[7px] text-slate-500 font-mono">● {newsCoords.length} news events</span>
+                          <span className="text-[7px] text-slate-500 font-mono">Range: {formatMoney(minVal)} — {formatMoney(maxVal)}</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* SKIP / CHOOSE buttons */}
@@ -1078,6 +1113,26 @@ function RuleSelectPhase({ company, hand, onConfirm, settings, equipSize, previo
         <div className="grid grid-cols-2 gap-2 flex-1 overflow-y-auto p-1.5 -m-1.5">
           {hand.map(card => {
             const isSelected = selected.includes(card.id);
+            const selectedCards = hand.filter(c => selected.includes(c.id));
+            const activeCombos = detectCombos(selectedCards);
+            const cardCombo = activeCombos.find(c => c.cardIds.includes(card.id));
+            const isPartOfCombo = !!cardCombo;
+            const comboFull = cardCombo ? isComboComplete(cardCombo, new Set(selected)) : false;
+
+            // Tag colors
+            const tagColors: Record<string, string> = {
+              dip: 'bg-rose-100 text-rose-700 border-rose-300',
+              surge: 'bg-emerald-100 text-emerald-700 border-emerald-300',
+              'news+': 'bg-blue-100 text-blue-700 border-blue-300',
+              'news-': 'bg-orange-100 text-orange-700 border-orange-300',
+              news: 'bg-sky-100 text-sky-700 border-sky-300',
+              pattern: 'bg-purple-100 text-purple-700 border-purple-300',
+              position: 'bg-amber-100 text-amber-700 border-amber-300',
+              timing: 'bg-indigo-100 text-indigo-700 border-indigo-300',
+              wild: 'bg-pink-100 text-pink-700 border-pink-300',
+            };
+            const roleIcons: Record<string, string> = { entry: '🛒', exit: '💸', hold: '🤲' };
+
             return (
               <button
                 key={card.id}
@@ -1093,14 +1148,29 @@ function RuleSelectPhase({ company, hand, onConfirm, settings, equipSize, previo
                   <div className="flex-1 min-w-0">
                     <p className="text-[11px] font-black text-slate-800 leading-tight">{card.title}</p>
                     <p className="text-[9px] text-slate-500 leading-snug mt-0.5">{card.description}</p>
-                    <span className={`inline-block mt-1 text-[7px] font-mono font-black px-1.5 py-0.5 rounded uppercase tracking-wider border ${
-                      card.action === 'buy' ? 'bg-emerald-50 text-emerald-700 border-emerald-400' :
-                      card.action === 'sell' ? 'bg-rose-50 text-rose-700 border-rose-400' :
-                      card.action === 'hold' ? 'bg-slate-100 text-slate-600 border-slate-400' :
-                      'bg-blue-50 text-blue-700 border-blue-400'
-                    }`}>
-                      {card.action === 'auto' ? '🤖 AUTO' : card.action.toUpperCase()}
-                    </span>
+                    {/* Tags row */}
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      <span className={`text-[7px] font-mono font-black px-1.5 py-0.5 rounded border ${tagColors[card.triggerTag] ?? 'bg-slate-100 text-slate-600 border-slate-300'}`}>
+                        {card.triggerTag.toUpperCase()}
+                      </span>
+                      <span className={`text-[7px] font-mono font-black px-1.5 py-0.5 rounded uppercase tracking-wider border ${
+                        card.action === 'buy' ? 'bg-emerald-50 text-emerald-700 border-emerald-400' :
+                        card.action === 'sell' ? 'bg-rose-50 text-rose-700 border-rose-400' :
+                        'bg-slate-100 text-slate-600 border-slate-400'
+                      }`}>
+                        {roleIcons[card.roleTag] ?? ''} {card.action.toUpperCase()}
+                      </span>
+                    </div>
+                    {/* Combo badge */}
+                    {isPartOfCombo && cardCombo && (
+                      <div className={`mt-1 text-[7px] font-mono font-black px-1.5 py-0.5 rounded border ${
+                        comboFull
+                          ? 'bg-yellow-200 text-yellow-800 border-yellow-400 animate-pulse'
+                          : 'bg-violet-50 text-violet-600 border-violet-300'
+                      }`}>
+                        {comboFull ? '🔥' : '🔗'} {cardCombo.name}
+                      </div>
+                    )}
                   </div>
                 </div>
               </button>

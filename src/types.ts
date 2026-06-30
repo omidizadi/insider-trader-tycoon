@@ -65,16 +65,44 @@ export interface NewsHeadline {
   source: string;
 }
 
+// Trigger tag: what market condition fires this card.
+export type TriggerTag = 'dip' | 'surge' | 'news+' | 'news-' | 'news' | 'pattern' | 'position' | 'timing' | 'wild';
+
+// Role tag: what the card does when triggered.
+export type RoleTag = 'entry' | 'exit' | 'hold';
+
 // A rule card the player equips to program the trading bot.
 export interface RuleCard {
   id: string;
   title: string;
   description: string;
   emoji: string;
-  // Action the bot takes when this rule fires. 'auto' = let the bot decide via other rules.
-  action: 'buy' | 'sell' | 'hold' | 'auto';
-  // Category for filtering / display.
-  category: 'momentum' | 'news' | 'price' | 'position' | 'streak' | 'risk' | 'time' | 'sentiment';
+  // Action the bot takes when this rule fires.
+  action: 'buy' | 'sell' | 'hold';
+  // Category for display grouping.
+  category: 'dip' | 'surge' | 'news' | 'pattern' | 'position' | 'timing' | 'wild';
+  // Trigger tag: what market condition activates this card.
+  triggerTag: TriggerTag;
+  // Role tag: entry (buy), exit (sell), or hold.
+  roleTag: RoleTag;
+  // Synergy tags: what other trigger tags this card combos with.
+  synergyTags: TriggerTag[];
+  // If this card is part of a named combo, the combo id.
+  comboId?: string;
+}
+
+// A named combo: a set of cards that work together for a bonus.
+export interface Combo {
+  id: string;
+  name: string;
+  description: string;
+  emoji: string;
+  // Card IDs that form this combo.
+  cardIds: string[];
+  // Which card IDs are needed for the combo to be "complete".
+  requiredIds: string[];
+  // The bonus applied when the combo is active: relax the entry card's threshold.
+  bonusDescription: string;
 }
 
 export interface RoundEvalContext {
@@ -101,6 +129,19 @@ export interface RoundGoal {
 
 export type GamePhase = 'menu' | 'round_intro' | 'stock_select' | 'rule_select' | 'trading' | 'round_complete' | 'game_over';
 
+/** Price + news event for a single trading tick. */
+export interface PriceEvent {
+  news: NewsHeadline | null;
+  newsId?: string;
+}
+
+/** Pre-generated round script: deterministic price series + news events. */
+export interface RoundScript {
+  prices: number[];
+  newsEvents: (PriceEvent | null)[];
+  historyLength: number;
+}
+
 export interface GameSessionState {
   cash: number;
   roundStartCash: number;     // bankroll at the start of the current round (for goal eval)
@@ -115,4 +156,8 @@ export interface GameSessionState {
   lastRoundProfit: number;
   lastRoundEvalContext: RoundEvalContext | null;
   lastRoundPassed: boolean;
+  // Pre-generated round script (deterministic price + news series).
+  roundScript: RoundScript | null;
+  // Preview script for stock_select phase (separate from roundScript so preview can be generated earlier).
+  previewScript: RoundScript | null;
 }
