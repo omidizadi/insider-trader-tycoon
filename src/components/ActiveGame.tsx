@@ -26,9 +26,9 @@ interface ActiveGameProps {
 // Number of ticks per trading round. The bot acts once per tick.
 const TICKS_PER_ROUND = 12;
 // Number of rule cards the player picks from.
-const RULE_HAND_SIZE = 6;
+const RULE_HAND_SIZE = 8;
 // Number of rules the player equips.
-const RULE_EQUIP_SIZE = 3;
+const RULE_EQUIP_SIZE = 5;
 
 type LogEntry =
   | { kind: 'news'; news: NewsHeadline; tick: number }
@@ -76,6 +76,8 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
   const [previewCompany, setPreviewCompany] = useState<Company | null>(null);
   // Whether the news/log panel is expanded on the trading screen.
   const [newsExpanded, setNewsExpanded] = useState(false);
+  // Shuffle charges remaining for the entire run (3 total).
+  const [shuffleLeft, setShuffleLeft] = useState(3);
 
   const playedCompanyIds = useRef<string[]>([]);
 
@@ -161,6 +163,18 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
     setRuleHand(pickRuleChoices(RULE_HAND_SIZE, [], gameState.selectedRules.map(r => r.id)));
     setRoundHigh(history[history.length - 1]);
     setRoundLow(history[history.length - 1]);
+  };
+
+  // Shuffle unselected cards in the rule hand (costs 1 charge, 3 per run).
+  const handleShuffleHand = (currentSelectedIds: string[]) => {
+    if (shuffleLeft <= 0) return;
+    if (settings.soundEnabled) playSound('click');
+    setShuffleLeft(prev => prev - 1);
+    setRuleHand(prev => {
+      const kept = prev.filter(c => currentSelectedIds.includes(c.id));
+      const fresh = pickRuleChoices(RULE_HAND_SIZE - kept.length, [], []);
+      return [...kept, ...fresh].sort(() => Math.random() - 0.5);
+    });
   };
 
   // ===== PHASE: rule_select → trading =====
@@ -616,6 +630,8 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
               settings={settings}
               equipSize={RULE_EQUIP_SIZE}
               previouslySelected={gameState.selectedRules.map(r => r.id)}
+              shuffleLeft={shuffleLeft}
+              onShuffle={handleShuffleHand}
             />
           )}
 
@@ -1008,9 +1024,11 @@ interface RuleSelectProps {
   settings: GameSettings;
   equipSize: number;
   previouslySelected: string[];
+  shuffleLeft: number;
+  onShuffle: (currentSelectedIds: string[]) => void;
 }
 
-function RuleSelectPhase({ company, hand, onConfirm, settings, equipSize, previouslySelected }: RuleSelectProps) {
+function RuleSelectPhase({ company, hand, onConfirm, settings, equipSize, previouslySelected, shuffleLeft, onShuffle }: RuleSelectProps) {
   // Pre-select any previously equipped rules that appear in this round's hand.
   const [selected, setSelected] = useState<string[]>(() =>
     hand.filter(c => previouslySelected.includes(c.id)).map(c => c.id)
@@ -1090,21 +1108,40 @@ function RuleSelectPhase({ company, hand, onConfirm, settings, equipSize, previo
           })}
         </div>
 
-        {/* Confirm */}
-        <div className="relative group w-full mt-4">
-          <div className={`absolute inset-0 rounded-[18px] translate-y-1.5 ${selected.length === equipSize ? 'bg-emerald-600' : 'bg-slate-300'}`} />
-          <button
-            disabled={selected.length !== equipSize}
-            onClick={() => onConfirm(hand.filter(c => selected.includes(c.id)))}
-            className={`relative w-full border-2 border-slate-800 font-black py-3 rounded-[18px] flex items-center justify-center gap-2 cursor-pointer text-xs transition-transform active:translate-y-1.5 ${
-              selected.length === equipSize
-                ? 'bg-emerald-400 hover:bg-emerald-300 text-white'
-                : 'bg-slate-100 text-slate-400 cursor-not-allowed'
-            }`}
-          >
-            <Bot className="w-4 h-4" />
-            DEPLOY BOT 🚀
-          </button>
+        {/* Shuffle + Confirm */}
+        <div className="flex gap-2 mt-4">
+          {/* Shuffle button */}
+          <div className="relative group">
+            <div className={`absolute inset-0 rounded-[18px] translate-y-1.5 ${shuffleLeft > 0 ? 'bg-violet-600' : 'bg-slate-300'}`} />
+            <button
+              disabled={shuffleLeft <= 0}
+              onClick={() => onShuffle(selected)}
+              className={`relative border-2 border-slate-800 font-black py-3 px-4 rounded-[18px] flex items-center justify-center gap-1.5 cursor-pointer text-xs transition-transform active:translate-y-1.5 ${
+                shuffleLeft > 0
+                  ? 'bg-violet-400 hover:bg-violet-300 text-white'
+                  : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+              }`}
+            >
+              🔀 Shuffle ({shuffleLeft})
+            </button>
+          </div>
+
+          {/* Confirm button */}
+          <div className="relative group flex-1">
+            <div className={`absolute inset-0 rounded-[18px] translate-y-1.5 ${selected.length === equipSize ? 'bg-emerald-600' : 'bg-slate-300'}`} />
+            <button
+              disabled={selected.length !== equipSize}
+              onClick={() => onConfirm(hand.filter(c => selected.includes(c.id)))}
+              className={`relative w-full border-2 border-slate-800 font-black py-3 rounded-[18px] flex items-center justify-center gap-2 cursor-pointer text-xs transition-transform active:translate-y-1.5 ${
+                selected.length === equipSize
+                  ? 'bg-emerald-400 hover:bg-emerald-300 text-white'
+                  : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+              }`}
+            >
+              <Bot className="w-4 h-4" />
+              DEPLOY BOT 🚀
+            </button>
+          </div>
         </div>
       </div>
     </motion.div>
