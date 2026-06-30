@@ -53,8 +53,8 @@ export default function MainMenu({
         transition={{ type: 'spring', damping: 15 }}
         className="text-center my-4 pr-1"
       >
-        <div className="inline-flex items-center justify-center w-16 h-16 rounded-[24px] bg-yellow-100 border-2 border-slate-800 shadow-[4px_4px_0_0_#1e293b] transform rotate-3 mb-2 relative group">
-          <span className="text-3xl animate-bounce">🤫</span>
+        <div className="inline-flex items-center justify-center w-16 h-16 rounded-[24px] bg-emerald-100 border-2 border-slate-800 shadow-[4px_4px_0_0_#1e293b] transform -rotate-3 mb-2 relative group">
+          <span className="text-3xl animate-bounce">🤖</span>
           <motion.div 
             animate={{ rotate: 360 }}
             transition={{ repeat: Infinity, duration: 10, ease: 'linear' }}
@@ -63,10 +63,10 @@ export default function MainMenu({
         </div>
         
         <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-slate-800 drop-shadow-sm font-sans uppercase">
-          INSIDER <span className="text-rose-500">TRADER</span> <span className="text-emerald-500">TYCOON</span>
+          TRADING <span className="text-emerald-500">BOT</span> <span className="text-amber-500">TYCOON</span>
         </h1>
         <p className="text-[10px] font-mono tracking-widest text-slate-400 uppercase">
-          🤫 CONFIDENTIAL INTEL LEAKS ONLY 🤫
+          🤖 PROGRAM YOUR BOT. BEAT THE MARKET. 🤖
         </p>
       </motion.div>
 
@@ -165,10 +165,10 @@ export default function MainMenu({
 
                 {/* Rules / Tip Callout */}
                 <div className="text-xs bg-yellow-50 rounded-[24px] p-4 border-2 border-slate-800 shadow-[3px_3px_0_0_#1e293b] flex gap-2.5 items-start text-slate-600">
-                  <span className="text-xl shrink-0">🤫</span>
+                  <span className="text-xl shrink-0">�</span>
                   <div className="text-left">
-                    <span className="font-extrabold block text-slate-800 mb-0.5 text-xs">INSIDER MANUAL</span>
-                    Listen in on confidential market news leaks. Click <strong>Trade</strong>, then decide to <strong>Buy</strong>, <strong>Hold</strong> or <strong>Sell</strong> before the public finds out! Costs 1 Key per action.
+                    <span className="font-extrabold block text-slate-800 mb-0.5 text-xs">BOT MANUAL</span>
+                    Each round has a goal. Pick a stock, then equip <strong>rule cards</strong> to program your trading bot. The bot buys/sells automatically based on your rules. Clear the goal to advance!
                   </div>
                 </div>
 
@@ -181,7 +181,7 @@ export default function MainMenu({
                     className="relative w-full bg-emerald-400 hover:bg-emerald-350 border-2 border-slate-800 text-white font-black text-base py-3.5 rounded-[24px] flex items-center justify-center gap-2.5 transition-transform active:translate-y-1.5 cursor-pointer select-none"
                   >
                     <Play className="w-5 h-5 fill-white text-white" />
-                    ENTER ACTIVE PIPELINE
+                    START TRADING
                   </button>
                 </div>
               </motion.div>
@@ -293,9 +293,9 @@ export default function MainMenu({
 
         {/* Footer info badge */}
         <div className="bg-slate-800 p-2 text-center text-[9px] text-slate-300 font-mono flex items-center justify-center gap-1 border-t border-slate-800 uppercase tracking-wider">
-          <span>COIN TRADER POCKET EDITION</span>
+          <span>TRADING BOT TYCOON</span>
           <span>•</span>
-          <span>NO RISK</span>
+          <span>PROGRAM THE BOT</span>
         </div>
       </div>
       

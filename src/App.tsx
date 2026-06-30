@@ -76,19 +76,19 @@ export default function App() {
     roundsPlayed: number
   ) => {
     // Determine funny unlocked rank title based on peak balance
-    let unlockedTitle = '🐹 Apprentice';
+    let unlockedTitle = '🐹 Apprentice Bot';
     if (highestCash >= 10000) {
-      unlockedTitle = '👑 Giga Whale';
+      unlockedTitle = '👑 Bot Tycoon';
     } else if (highestCash >= 5000) {
-      unlockedTitle = '💎 Pro Trader';
+      unlockedTitle = '💎 Pro Botter';
     } else if (highestCash >= 2500) {
-      unlockedTitle = '🦁 Boba Baron';
+      unlockedTitle = '🦁 Whale Bot';
     } else if (highestCash >= 1000) {
-      unlockedTitle = '🥑 Avocado Tycoon';
+      unlockedTitle = '🥑 Avocado Bot';
     } else if (finalCash > 0) {
-      unlockedTitle = '🍕 Pizza Earn';
+      unlockedTitle = '🍕 Pizza Bot';
     } else {
-      unlockedTitle = '💀 Busted';
+      unlockedTitle = '💀 Busted Bot';
     }
 
     const newRun: Run = {
@@ -137,17 +137,17 @@ export default function App() {
       {/* Sidebar background labels for the cool Artistic Flair desktop aesthetics */}
       <div className="fixed left-8 top-1/2 -translate-y-1/2 hidden xl:block space-y-12 select-none pointer-events-none">
         <div className="transform -rotate-12">
-          <p className="font-extrabold text-5xl text-rose-950/10 tracking-tighter leading-none mb-1 font-sans">INSIDER</p>
-          <p className="font-extrabold text-6xl text-slate-950/25 tracking-tighter leading-none font-sans">TRADER</p>
+          <p className="font-extrabold text-5xl text-emerald-950/10 tracking-tighter leading-none mb-1 font-sans">TRADING</p>
+          <p className="font-extrabold text-6xl text-slate-950/25 tracking-tighter leading-none font-sans">BOT</p>
         </div>
         <div className="space-y-4">
           <div className="flex items-center gap-4 opacity-70">
-            <div className="w-12 h-12 bg-white rounded-full border-2 border-slate-800 flex items-center justify-center shadow-[4px_4px_0_0_#1e293b] text-xl">🤫</div>
-            <p className="font-black text-slate-800 text-xs tracking-widest">CONFIDENTIAL</p>
+            <div className="w-12 h-12 bg-white rounded-full border-2 border-slate-800 flex items-center justify-center shadow-[4px_4px_0_0_#1e293b] text-xl">🤖</div>
+            <p className="font-black text-slate-800 text-xs tracking-widest">AUTOMATE</p>
           </div>
           <div className="flex items-center gap-4 opacity-75">
-            <div className="w-12 h-12 bg-white rounded-full border-2 border-slate-800 flex items-center justify-center shadow-[4px_4px_0_0_#1e293b] text-xl">📈</div>
-            <p className="font-black text-slate-800 text-xs tracking-widest">LEAK DEALS</p>
+            <div className="w-12 h-12 bg-white rounded-full border-2 border-slate-800 flex items-center justify-center shadow-[4px_4px_0_0_#1e293b] text-xl">📰</div>
+            <p className="font-black text-slate-800 text-xs tracking-widest">BREAKING NEWS</p>
           </div>
           <div className="flex items-center gap-4 opacity-75">
             <div className="w-12 h-12 bg-white rounded-full border-2 border-slate-800 flex items-center justify-center shadow-[4px_4px_0_0_#1e293b] text-xl">💼</div>

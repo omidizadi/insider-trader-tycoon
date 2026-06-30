@@ -1,11 +1,21 @@
-import { Company } from '../types';
+import { Company, NewsMagnitude } from '../types';
 import { EXTRA_HEADLINE_TEMPLATES } from '../extraHeadlines';
 
 export interface NewsHeadline {
   text: string;
   sentiment: 'positive' | 'negative' | 'neutral';
+  magnitude: NewsMagnitude; // 5-bucket magnitude for the bot rules
   impactPercent: number; // multiplier for stock change
   source: string;
+}
+
+// Map a legacy sentiment + impactPercent to a 5-bucket magnitude.
+// ponytail: ceiling — naive threshold split, but good enough for casual play.
+export function magnitudeFromImpact(sentiment: 'positive' | 'negative' | 'neutral', impactPercent: number): NewsMagnitude {
+  const mag = Math.abs(impactPercent);
+  if (sentiment === 'positive') return mag >= 0.35 ? 'very_positive' : 'positive';
+  if (sentiment === 'negative') return mag >= 0.30 ? 'very_negative' : 'negative';
+  return 'neutral';
 }
 
 // Deterministic hashing helper
@@ -453,6 +463,7 @@ export function generate50HeadlinesForCompany(company: Company): NewsHeadline[] 
     return {
       text,
       sentiment: t.sentiment,
+      magnitude: magnitudeFromImpact(t.sentiment, t.impactPercent),
       impactPercent: t.impactPercent,
       source
     };

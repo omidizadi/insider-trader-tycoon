@@ -1,15 +1,20 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  ArrowLeft, Coins, Check, AlertCircle, Sparkles, TrendingUp, TrendingDown, 
-  HelpCircle, ChevronRight, CornerDownRight, Landmark, ArrowRight, RotateCcw,
-  HandMetal, ShoppingCart, Star, Skull, HeartCrack, Volume2, Info, Newspaper, Clock
+import {
+  Coins, Check, Sparkles, TrendingUp, TrendingDown,
+  Bot, Target, Skull, Play
 } from 'lucide-react';
-import { Company, GameSessionState, GameSettings, TradePosition, START_CASH } from '../types';
+import {
+  Company, GameSessionState, GameSettings, TradePosition, START_CASH,
+  NewsHeadline, MAGNITUDE_META, RuleCard, RoundEvalContext
+} from '../types';
 import { getRandomCompany } from '../companies';
 import { playSound } from '../utils/audio';
-import { NewsHeadline, pickRandomHeadline } from '../utils/headlines';
+import { pickRandomHeadline } from '../utils/headlines';
 import { getDifficultyFactor, getMinVolatility, getNewsImpactMultiplier } from '../utils/difficulty';
+import { pickRuleChoices } from '../data/rules';
+import { getRound } from '../data/rounds';
+import { resolveBotAction, BotContext } from '../utils/botEngine';
 
 interface ActiveGameProps {
   settings: GameSettings;
@@ -18,1599 +23,1090 @@ interface ActiveGameProps {
   onExitGame: (finalCash: number, highestCash: number, companiesTraded: number, roundsPlayed: number) => void;
 }
 
-export default function ActiveGame({
-  settings,
-  runsCount,
-  onFinishGame,
-  onExitGame
-}: ActiveGameProps) {
-  
-  // Initialize game session on first mount
-  const [gameState, setGameState] = useState<GameSessionState>(() => {
-    const startCompany = getRandomCompany([]);
-    const initialPrice = startCompany.basePrice;
-    
-    // Generate some starter historical points for the chart
-    const initialHistory: number[] = [];
-    let curPrice = initialPrice;
-    for (let i = 0; i < 10; i++) {
-      // Simulate random walk
-      const change = curPrice * (Math.random() * startCompany.volatility * 0.4 - startCompany.volatility * 0.18 + startCompany.trend * 0.2);
-      curPrice = Math.max(1, Number((curPrice + change).toFixed(2)));
-      initialHistory.push(curPrice);
-    }
+// Number of ticks per trading round. The bot acts once per tick.
+const TICKS_PER_ROUND = 12;
+// Number of rule cards the player picks from.
+const RULE_HAND_SIZE = 6;
+// Number of rules the player equips.
+const RULE_EQUIP_SIZE = 3;
 
-    return {
-      cash: START_CASH,
-      currentCompany: startCompany,
-      chartPoints: initialHistory,
-      position: null,
-      phase: 'discovery',
-      roundNumber: 1,
-      companiesTradedCount: 0,
-      highestCashInSession: START_CASH,
-      lastRoundProfit: 0
-    };
-  });
+type LogEntry =
+  | { kind: 'news'; news: NewsHeadline; tick: number }
+  | { kind: 'action'; action: 'buy' | 'sell' | 'hold'; price: number; rule: RuleCard | null; tick: number; chartIndex: number };
 
-  // Track historical company IDs to avoid duplicates
-  const playedCompanyIds = useRef<string[]>([gameState.currentCompany.id]);
+export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGame }: ActiveGameProps) {
+  const [gameState, setGameState] = useState<GameSessionState>(() => ({
+    cash: START_CASH,
+    roundStartCash: START_CASH,
+    currentCompany: null,
+    selectedRules: [],
+    chartPoints: [],
+    position: null,
+    phase: 'round_intro',
+    roundNumber: 1,
+    companiesTradedCount: 0,
+    highestCashInSession: START_CASH,
+    lastRoundProfit: 0,
+    lastRoundEvalContext: null,
+    lastRoundPassed: false,
+  }));
 
-  // Persistent Off-market Gems and Session Access Actions (Keys)
-  const [gems, setGems] = useState<number>(() => {
-    try {
-      const stored = localStorage.getItem('cointrader_gems_v3');
-      return stored ? parseInt(stored, 10) : 50;
-    } catch {
-      return 50;
-    }
-  });
-  const [actionsRemaining, setActionsRemaining] = useState<number>(10);
-  const [showRefillNeeded, setShowRefillNeeded] = useState<boolean>(false);
-  const [freeBribeCooldown, setFreeBribeCooldown] = useState<number>(0);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('cointrader_gems_v3', gems.toString());
-    } catch (e) {
-      console.error(e);
-    }
-  }, [gems]);
-
-  useEffect(() => {
-    if (freeBribeCooldown <= 0) return;
-    const interval = setInterval(() => {
-      setFreeBribeCooldown(prev => Math.max(0, prev - 1));
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [freeBribeCooldown]);
-
-  // News Headlines & Real-time Auto-Drift Game States
-  const [tradingSubPhase, setTradingSubPhase] = useState<'idle' | 'auto_drift_init' | 'news_pending' | 'auto_drift_impact' | 'cooldown'>('idle');
-  const [ticksRemaining, setTicksRemaining] = useState<number>(0);
-  const [currentNews, setCurrentNews] = useState<NewsHeadline | null>(null);
-  const [isNewsMinimized, setIsNewsMinimized] = useState<boolean>(false);
-  const [showNewsPopup, setShowNewsPopup] = useState<boolean>(false);
-
-  useEffect(() => {
-    if (currentNews) {
-      setIsNewsMinimized(false);
-      setShowNewsPopup(false);
-    }
-  }, [currentNews]);
-  const [cooldownTime, setCooldownTime] = useState<number>(0);
+  // Rule selection hand for the current round.
+  const [ruleHand, setRuleHand] = useState<RuleCard[]>([]);
+  // Trading log entries (news + bot actions).
+  const [log, setLog] = useState<LogEntry[]>([]);
+  // Current tick within the round.
+  const [tickIndex, setTickIndex] = useState(0);
+  // All-time high/low this round.
+  const [roundHigh, setRoundHigh] = useState(0);
+  const [roundLow, setRoundLow] = useState(0);
+  // News seen this round (for goal eval + bot context). Most recent first.
+  const [newsSeen, setNewsSeen] = useState<NewsHeadline[]>([]);
+  // Biggest single-trade profit this round.
+  const [biggestTradeProfit, setBiggestTradeProfit] = useState(0);
+  // Trades count this round.
+  const [tradesCount, setTradesCount] = useState(0);
+  // Used news ids to avoid repeats.
   const [usedNewsIds, setUsedNewsIds] = useState<Set<string>>(() => new Set());
-  
-  // Transaction markers state for the active round
-  const [transactions, setTransactions] = useState<{ index: number; price: number; type: 'buy' | 'sell'; amount: number }[]>([]);
+  // The most recent bot action highlight.
+  const [lastBotAction, setLastBotAction] = useState<{ action: 'buy' | 'sell' | 'hold'; rule: RuleCard | null } | null>(null);
+  // Guard so the round-end evaluation only runs once per round.
+  const [roundEnded, setRoundEnded] = useState(false);
+  // The stock currently being previewed in the stock picker.
+  const [previewCompany, setPreviewCompany] = useState<Company | null>(null);
+  // Whether the news/log panel is expanded on the trading screen.
+  const [newsExpanded, setNewsExpanded] = useState(false);
 
-  // Active point index state to scan along the pre-generated chart points
-  const [activePointIndex, setActivePointIndex] = useState<number>(() => gameState.chartPoints.length - 1);
+  const playedCompanyIds = useRef<string[]>([]);
 
-  // Format large money amounts with K/M/B suffixes
+  // Refs to read latest values inside the interval without re-subscribing.
+  const newsSeenRef = useRef(newsSeen);
+  const roundHighRef = useRef(roundHigh);
+  const roundLowRef = useRef(roundLow);
+  const biggestTradeProfitRef = useRef(biggestTradeProfit);
+  const tradesCountRef = useRef(tradesCount);
+  const usedNewsIdsRef = useRef(usedNewsIds);
+  const selectedRulesRef = useRef(gameState.selectedRules);
+  const roundStartCashRef = useRef(gameState.roundStartCash);
+  const currentRoundNumberRef = useRef(gameState.roundNumber);
+  useEffect(() => { newsSeenRef.current = newsSeen; }, [newsSeen]);
+  useEffect(() => { roundHighRef.current = roundHigh; }, [roundHigh]);
+  useEffect(() => { roundLowRef.current = roundLow; }, [roundLow]);
+  useEffect(() => { biggestTradeProfitRef.current = biggestTradeProfit; }, [biggestTradeProfit]);
+  useEffect(() => { tradesCountRef.current = tradesCount; }, [tradesCount]);
+  useEffect(() => { usedNewsIdsRef.current = usedNewsIds; }, [usedNewsIds]);
+  useEffect(() => { selectedRulesRef.current = gameState.selectedRules; }, [gameState.selectedRules]);
+  useEffect(() => { roundStartCashRef.current = gameState.roundStartCash; }, [gameState.roundStartCash]);
+  useEffect(() => { currentRoundNumberRef.current = gameState.roundNumber; }, [gameState.roundNumber]);
+
+  // Format money with K/M/B/T suffixes.
   const formatMoney = (value: number): string => {
     const abs = Math.abs(value);
     const sign = value < 0 ? '-' : '';
-    if (abs >= 1_000_000_000_000) return `${sign}$${(abs / 1_000_000_000_000).toFixed(1)}T`;
-    if (abs >= 1_000_000_000) return `${sign}$${(abs / 1_000_000_000).toFixed(1)}B`;
-    if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(1)}M`;
+    if (abs >= 1_000_000_000_000) return `${sign}$${(abs / 1_000_000_000_000).toFixed(2)}T`;
+    if (abs >= 1_000_000_000) return `${sign}$${(abs / 1_000_000_000).toFixed(2)}B`;
+    if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(2)}M`;
     if (abs >= 10_000) return `${sign}$${(abs / 1_000).toFixed(1)}K`;
     return `${sign}$${abs.toFixed(2)}`;
   };
 
-  // Performance-optimized Refs for Real-time Game Ticker
-  const currentCompanyRef = useRef(gameState.currentCompany);
-  const usedNewsIdsRef = useRef(usedNewsIds);
-  const currentNewsRef = useRef(currentNews);
+  const difficultyFactor = useMemo(() => getDifficultyFactor(gameState.cash), [gameState.cash]);
+  const minVolatility = useMemo(() => getMinVolatility(difficultyFactor), [difficultyFactor]);
+  const currentRound = getRound(gameState.roundNumber);
 
-  useEffect(() => {
-    currentCompanyRef.current = gameState.currentCompany;
-  }, [gameState.currentCompany]);
-
-  useEffect(() => {
-    usedNewsIdsRef.current = usedNewsIds;
-  }, [usedNewsIds]);
-
-  useEffect(() => {
-    currentNewsRef.current = currentNews;
-  }, [currentNews]);
-
-  // Handle company skipping
-  const handleSkipCompany = () => {
-    if (settings.soundEnabled) playSound('skip');
-    
-    const nextComp = getRandomCompany(playedCompanyIds.current, minVolatility);
-    playedCompanyIds.current.push(nextComp.id);
-
-    // Generate price history for the next company
-    const nextHistory: number[] = [];
-    let curPrice = nextComp.basePrice;
-    for (let i = 0; i < 10; i++) {
-      const change = curPrice * (Math.random() * nextComp.volatility * 0.4 - nextComp.volatility * 0.18 + nextComp.trend * 0.2);
+  // Generate initial price history for a company.
+  const generateHistory = (company: Company): number[] => {
+    const history: number[] = [];
+    let curPrice = company.basePrice;
+    for (let i = 0; i < 8; i++) {
+      const change = curPrice * (Math.random() * company.volatility * 0.4 - company.volatility * 0.18 + company.trend * 0.2);
       curPrice = Math.max(1, Number((curPrice + change).toFixed(2)));
-      nextHistory.push(curPrice);
+      history.push(curPrice);
     }
+    return history;
+  };
 
-    setTradingSubPhase('idle');
-    setTicksRemaining(0);
-    setCurrentNews(null);
-    setShowNewsPopup(false);
-    setCooldownTime(0);
-    setUsedNewsIds(new Set());
-    setActivePointIndex(9);
-    setTransactions([]);
-    setActionsRemaining(10);
+  // ===== PHASE: round_intro → stock_select =====
+  const handleStartRound = () => {
+    if (settings.soundEnabled) playSound('click');
+    const comp = getRandomCompany(playedCompanyIds.current, minVolatility);
+    setPreviewCompany(comp);
+    setGameState(prev => ({ ...prev, phase: 'stock_select' }));
+  };
+
+  // Skip the previewed stock and roll a new one.
+  const handleSkipStock = () => {
+    if (settings.soundEnabled) playSound('skip');
+    const comp = getRandomCompany(playedCompanyIds.current, minVolatility);
+    setPreviewCompany(comp);
+  };
+
+  // ===== PHASE: stock_select → rule_select =====
+  const handlePickStock = () => {
+    if (!previewCompany) return;
+    if (settings.soundEnabled) playSound('click');
+    const nextComp = previewCompany;
+    playedCompanyIds.current.push(nextComp.id);
+    const history = generateHistory(nextComp);
 
     setGameState(prev => ({
       ...prev,
       currentCompany: nextComp,
-      chartPoints: nextHistory,
+      chartPoints: history,
       position: null,
-      phase: 'discovery',
-      roundNumber: prev.roundNumber + 1
+      phase: 'rule_select',
+      companiesTradedCount: prev.companiesTradedCount + 1,
     }));
+
+    setRuleHand(pickRuleChoices(RULE_HAND_SIZE, [], gameState.selectedRules.map(r => r.id)));
+    setRoundHigh(history[history.length - 1]);
+    setRoundLow(history[history.length - 1]);
   };
 
-  // Convert Discovery to Active Trading
-  const handleStartTrading = () => {
+  // ===== PHASE: rule_select → trading =====
+  const handleEquipRules = (rules: RuleCard[]) => {
     if (settings.soundEnabled) playSound('click');
     setGameState(prev => ({
       ...prev,
+      selectedRules: rules,
       phase: 'trading',
-      companiesTradedCount: prev.companiesTradedCount + 1
     }));
+    setLog([]);
+    setTickIndex(0);
+    setNewsSeen([]);
+    setBiggestTradeProfit(0);
+    setTradesCount(0);
+    setUsedNewsIds(new Set());
+    setLastBotAction(null);
+    setRoundEnded(false);
   };
 
-  // Buy action (flexible chunk size)
-  const handleBuyTransaction = (amount: number = 100) => {
-    if (actionsRemaining <= 0) {
-      setShowRefillNeeded(true);
-      if (settings.soundEnabled) playSound('click');
-      return;
+  // Generate the next price point given the company + optional news impact.
+  const generateNextPrice = (company: Company, currentPrice: number, news?: NewsHeadline | null): number => {
+    let change: number;
+    if (news) {
+      const mult = getNewsImpactMultiplier(news.sentiment, difficultyFactor);
+      const totalImpact = news.impactPercent * mult;
+      const target = Math.max(1, currentPrice * (1 + totalImpact));
+      // Move ~40% of the way to the target each tick (impact unfolds over several ticks).
+      change = (target - currentPrice) * 0.4;
+    } else {
+      change = currentPrice * (Math.random() * company.volatility * 0.12 - company.volatility * 0.06 + company.trend * 0.04);
     }
-
-    const currentPriceTmp = gameState.chartPoints[activePointIndex];
-    if (gameState.cash < amount || amount <= 0) return; // double check
-
-    if (settings.soundEnabled) playSound('buy');
-
-    // Deduct action key
-    setActionsRemaining(prev => Math.max(0, prev - 1));
-
-    // Add transaction marker for buying
-    setTransactions(prev => [...prev, { index: activePointIndex, price: currentPriceTmp, type: 'buy', amount }]);
-
-    // Calculate shares purchased for custom amount
-    const sharesBought = amount / currentPriceTmp;
-
-    setGameState(prev => {
-      const prevPosition = prev.position;
-      
-      let updatedPosition: TradePosition;
-      if (prevPosition) {
-        const totalShares = prevPosition.shares + sharesBought;
-        const totalInvested = prevPosition.investedCash + amount;
-        updatedPosition = {
-          ticker: prev.currentCompany.ticker,
-          shares: totalShares,
-          investedCash: totalInvested,
-          avgBuyPrice: Number((totalInvested / totalShares).toFixed(2))
-        };
-      } else {
-        updatedPosition = {
-          ticker: prev.currentCompany.ticker,
-          shares: sharesBought,
-          investedCash: amount,
-          avgBuyPrice: currentPriceTmp
-        };
-      }
-
-      const nextPoints = [...prev.chartPoints];
-      const nextCash = Number((prev.cash - amount).toFixed(2));
-
-      // Check current subphase to determine point pre-generation!
-      if (tradingSubPhase === 'idle') {
-        // Pre-generate 5 points for auto_drift_init
-        let curVal = currentPriceTmp;
-        for (let i = 0; i < 5; i++) {
-          const change = curVal * (Math.random() * prev.currentCompany.volatility * 0.12 - prev.currentCompany.volatility * 0.06 + prev.currentCompany.trend * 0.04);
-          curVal = Math.max(1, Number((curVal + change).toFixed(2)));
-          nextPoints.push(curVal);
-        }
-      } else if (tradingSubPhase === 'news_pending' && currentNews) {
-        // Pre-generate 11 points (6 impact + 5 cooldown)
-        const newsImpactMultiplier = getNewsImpactMultiplier(currentNews.sentiment, difficultyFactor);
-        const totalImpact = currentNews.impactPercent * newsImpactMultiplier;
-        const targetPrice = Math.max(1, Number((currentPriceTmp * (1 + totalImpact)).toFixed(2)));
-        
-        let curVal = currentPriceTmp;
-        
-        // 6 steps for impact phase
-        for (let i = 1; i <= 6; i++) {
-          const ratio = i / 6;
-          const baseInterp = currentPriceTmp + (targetPrice - currentPriceTmp) * ratio;
-          const jitterFactor = (1 - ratio) * (Math.random() * prev.currentCompany.volatility * 0.3 - prev.currentCompany.volatility * 0.15);
-          let stepVal = baseInterp * (1 + jitterFactor);
-          stepVal = Math.max(1, Number(stepVal.toFixed(2)));
-          nextPoints.push(stepVal);
-          curVal = stepVal;
-        }
-        
-        // 5 steps for cooldown phase
-        for (let i = 0; i < 5; i++) {
-          const change = curVal * (Math.random() * prev.currentCompany.volatility * 0.12 - prev.currentCompany.volatility * 0.06 + prev.currentCompany.trend * 0.04);
-          curVal = Math.max(1, Number((curVal + change).toFixed(2)));
-          nextPoints.push(curVal);
-        }
-      }
-
-      const sessionPeak = Math.max(prev.highestCashInSession, nextCash + (updatedPosition.shares * currentPriceTmp));
-
-      return {
-        ...prev,
-        cash: nextCash,
-        position: updatedPosition,
-        chartPoints: nextPoints,
-        highestCashInSession: sessionPeak
-      };
-    });
-
-    // Handle sub-phase transition!
-    if (tradingSubPhase === 'idle') {
-      setTicksRemaining(5);
-      setTradingSubPhase('auto_drift_init');
-    } else if (tradingSubPhase === 'news_pending') {
-      setCurrentNews(null); // Clear active news
-      setShowNewsPopup(false);
-      setTicksRemaining(11);
-      setTradingSubPhase('auto_drift_impact');
-    }
+    return Math.max(1, Number((currentPrice + change).toFixed(2)));
   };
 
-  // Sell action (flexible chunk size)
-  const handlePartialSellTransaction = (amount: number) => {
-    if (!gameState.position) return;
-    if (actionsRemaining <= 0) {
-      setShowRefillNeeded(true);
-      if (settings.soundEnabled) playSound('click');
-      return;
-    }
+  // ===== THE TRADING LOOP =====
+  // Each tick: maybe generate news, advance price, resolve bot action, log.
+  useEffect(() => {
+    if (gameState.phase !== 'trading') return;
+    if (roundEnded) return;
 
-    const currentPrice = gameState.chartPoints[activePointIndex];
-    const maxShares = gameState.position.shares;
-    const maxVal = maxShares * currentPrice;
+    const intervalId = setInterval(() => {
+      // Advance one tick.
+      setTickIndex(prevTick => {
+        const nextTick = prevTick + 1;
 
-    // Determine actual amount to sell (cannot exceed total position value)
-    const actualAmount = Math.min(amount, maxVal);
-    if (actualAmount <= 0) return;
+        // Generate the next price point + maybe news + bot action.
+        setGameState(prev => {
+          if (!prev.currentCompany) return prev;
+          const curPrice = prev.chartPoints[prev.chartPoints.length - 1] || prev.currentCompany.basePrice;
 
-    if (settings.soundEnabled) playSound('buy'); // Use buy sound or click
+          // Maybe generate news (every 2 ticks, starting tick 1).
+          let news: NewsHeadline | null = null;
+          if (nextTick % 2 === 1) {
+            const { headline, id } = pickRandomHeadline(prev.currentCompany!, usedNewsIdsRef.current);
+            setUsedNewsIds(prevSet => {
+              const copy = new Set(prevSet);
+              copy.add(id);
+              return copy;
+            });
+            news = headline;
+            setNewsSeen(prevNews => [headline, ...prevNews]);
+            setLog(prevLog => [...prevLog, { kind: 'news', news: headline, tick: nextTick }]);
+            if (settings.soundEnabled) playSound('click');
+          }
 
-    // Deduct action key
-    setActionsRemaining(prev => Math.max(0, prev - 1));
+          // Generate next price.
+          const nextPrice = generateNextPrice(prev.currentCompany, curPrice, news);
+          const nextPoints = [...prev.chartPoints, nextPrice];
+          setRoundHigh(h => Math.max(h, nextPrice));
+          setRoundLow(l => (l === 0 ? nextPrice : Math.min(l, nextPrice)));
 
-    // Add transaction marker for selling
-    setTransactions(prev => [...prev, { index: activePointIndex, price: currentPrice, type: 'sell', amount: actualAmount }]);
+          // Build bot context.
+          const recentNews = news ? [news, ...newsSeenRef.current] : newsSeenRef.current;
+          const botCtx: BotContext = {
+            price: nextPrice,
+            priceHistory: nextPoints.slice(-6),
+            position: prev.position,
+            cash: prev.cash,
+            startCash: prev.roundStartCash,
+            recentNews,
+            tickIndex: nextTick,
+            totalTicks: TICKS_PER_ROUND,
+            allTimeHigh: Math.max(roundHighRef.current, nextPrice),
+            allTimeLow: roundLowRef.current === 0 ? nextPrice : Math.min(roundLowRef.current, nextPrice),
+          };
 
-    const sharesToSell = actualAmount / currentPrice;
+          const { action, firedRule } = resolveBotAction(selectedRulesRef.current, botCtx);
 
-    setGameState(prev => {
-      if (!prev.position) return prev;
-      
-      const newShares = Math.max(0, prev.position.shares - sharesToSell);
-      const nextCash = Number((prev.cash + actualAmount).toFixed(2));
-      const sessionPeak = Math.max(prev.highestCashInSession, nextCash + (newShares * currentPrice));
+          // Execute the action.
+          if (action === 'buy' && prev.cash >= 1) {
+            const sharesBought = prev.cash / nextPrice;
+            const updatedPosition: TradePosition = prev.position
+              ? {
+                  ticker: prev.currentCompany!.ticker,
+                  shares: prev.position.shares + sharesBought,
+                  investedCash: prev.position.investedCash + prev.cash,
+                  avgBuyPrice: Number(((prev.position.investedCash + prev.cash) / (prev.position.shares + sharesBought)).toFixed(2)),
+                }
+              : { ticker: prev.currentCompany!.ticker, shares: sharesBought, investedCash: prev.cash, avgBuyPrice: nextPrice };
+            setLog(prevLog => [...prevLog, { kind: 'action', action: 'buy', price: nextPrice, rule: firedRule, tick: nextTick, chartIndex: nextPoints.length - 1 }]);
+            setLastBotAction({ action: 'buy', rule: firedRule });
+            if (settings.soundEnabled) playSound('buy');
+            return { ...prev, cash: 0, position: updatedPosition, chartPoints: nextPoints };
+          } else if (action === 'sell' && prev.position) {
+            const proceeds = prev.position.shares * nextPrice;
+            const profit = proceeds - prev.position.investedCash;
+            setBiggestTradeProfit(b => Math.max(b, profit));
+            setTradesCount(c => c + 1);
+            const nextCash = Number((prev.cash + proceeds).toFixed(2));
+            const peak = Math.max(prev.highestCashInSession, nextCash);
+            setLog(prevLog => [...prevLog, { kind: 'action', action: 'sell', price: nextPrice, rule: firedRule, tick: nextTick, chartIndex: nextPoints.length - 1 }]);
+            setLastBotAction({ action: 'sell', rule: firedRule });
+            if (settings.soundEnabled) playSound(profit >= 0 ? 'win' : 'lose');
+            return { ...prev, cash: nextCash, position: null, chartPoints: nextPoints, highestCashInSession: peak };
+          } else {
+            setLog(prevLog => [...prevLog, { kind: 'action', action: 'hold', price: nextPrice, rule: firedRule, tick: nextTick, chartIndex: nextPoints.length - 1 }]);
+            setLastBotAction({ action: 'hold', rule: firedRule });
+            return { ...prev, chartPoints: nextPoints };
+          }
+        });
 
-      let nextPosition: TradePosition | null = null;
-      if (newShares > 0.001) { // fractional share dust threshold
-        const ratio = newShares / prev.position.shares;
-        nextPosition = {
-          ...prev.position,
-          shares: newShares,
-          investedCash: Number((prev.position.investedCash * ratio).toFixed(2))
-        };
-      }
-
-      const nextPoints = [...prev.chartPoints];
-      if (tradingSubPhase === 'news_pending' && currentNews) {
-        // Pre-generate 11 points (6 impact + 5 cooldown)
-        const newsImpactMultiplier = getNewsImpactMultiplier(currentNews.sentiment, difficultyFactor);
-        const totalImpact = currentNews.impactPercent * newsImpactMultiplier;
-        const targetPrice = Math.max(1, Number((currentPrice * (1 + totalImpact)).toFixed(2)));
-        
-        let curVal = currentPrice;
-        
-        // 6 steps for impact phase
-        for (let i = 1; i <= 6; i++) {
-          const ratio = i / 6;
-          const baseInterp = currentPrice + (targetPrice - currentPrice) * ratio;
-          const jitterFactor = (1 - ratio) * (Math.random() * prev.currentCompany.volatility * 0.3 - prev.currentCompany.volatility * 0.15);
-          let stepVal = baseInterp * (1 + jitterFactor);
-          stepVal = Math.max(1, Number(stepVal.toFixed(2)));
-          nextPoints.push(stepVal);
-          curVal = stepVal;
+        // End of round?
+        if (nextTick >= TICKS_PER_ROUND) {
+          clearInterval(intervalId);
+          setRoundEnded(true);
+          // Force-sell any open position at the final price, then evaluate.
+          setTimeout(() => {
+            setGameState(prev => {
+              if (!prev.currentCompany) return prev;
+              const finalPrice = prev.chartPoints[prev.chartPoints.length - 1] || prev.currentCompany.basePrice;
+              let nextCash = prev.cash;
+              if (prev.position) {
+                const proceeds = prev.position.shares * finalPrice;
+                const profit = proceeds - prev.position.investedCash;
+                setBiggestTradeProfit(b => Math.max(b, profit));
+                setTradesCount(c => c + 1);
+                nextCash = Number((prev.cash + proceeds).toFixed(2));
+                if (settings.soundEnabled) playSound(profit >= 0 ? 'win' : 'lose');
+              }
+              const peak = Math.max(prev.highestCashInSession, nextCash);
+              const roundProfit = nextCash - prev.roundStartCash;
+              const returnPercent = prev.roundStartCash > 0 ? (roundProfit / prev.roundStartCash) * 100 : 0;
+              const evalCtx: RoundEvalContext = {
+                startCash: prev.roundStartCash,
+                endCash: nextCash,
+                peakCash: peak,
+                roundProfit,
+                returnPercent,
+                biggestSingleTradeProfit: biggestTradeProfitRef.current,
+                tradesCount: tradesCountRef.current,
+                newsSeen: newsSeenRef.current,
+              };
+              const round = getRound(prev.roundNumber);
+              const passed = round.evaluate(evalCtx);
+              return {
+                ...prev,
+                cash: nextCash,
+                position: null,
+                highestCashInSession: peak,
+                lastRoundProfit: roundProfit,
+                lastRoundEvalContext: evalCtx,
+                lastRoundPassed: passed,
+                phase: 'round_complete',
+              };
+            });
+          }, 500);
         }
-        
-        // 5 steps for cooldown phase
-        for (let i = 0; i < 5; i++) {
-          const change = curVal * (Math.random() * prev.currentCompany.volatility * 0.12 - prev.currentCompany.volatility * 0.06 + prev.currentCompany.trend * 0.04);
-          curVal = Math.max(1, Number((curVal + change).toFixed(2)));
-          nextPoints.push(curVal);
-        }
-      }
 
-      return {
-        ...prev,
-        cash: nextCash,
-        position: nextPosition,
-        chartPoints: nextPoints,
-        highestCashInSession: sessionPeak
-      };
-    });
-
-    // Handle sub-phase transition!
-    if (tradingSubPhase === 'news_pending') {
-      setCurrentNews(null); // Clear active news
-      setShowNewsPopup(false);
-      setTicksRemaining(11);
-      setTradingSubPhase('auto_drift_impact');
-    }
-  };
-
-  // Skip transaction or Go back (if 0 position exists yet)
-  const handleBackToDiscovery = () => {
-    if (settings.soundEnabled) playSound('click');
-    setGameState(prev => ({
-      ...prev,
-      phase: 'discovery'
-    }));
-  };
-
-  // Hold Action (Advances subphase or advances drift)
-  const handleHoldAction = () => {
-    if (actionsRemaining <= 0) {
-      setShowRefillNeeded(true);
-      if (settings.soundEnabled) playSound('click');
-      return;
-    }
-
-    if (settings.soundEnabled) playSound('click');
-
-    // Deduct action key
-    setActionsRemaining(prev => Math.max(0, prev - 1));
-
-    if (tradingSubPhase === 'news_pending' && currentNews) {
-      const currentPriceTmp = gameState.chartPoints[activePointIndex];
-
-      // Pre-generate 11 points (6 impact + 5 cooldown)
-      setGameState(prev => {
-        const newsImpactMultiplier = getNewsImpactMultiplier(currentNews.sentiment, difficultyFactor);
-        const totalImpact = currentNews.impactPercent * newsImpactMultiplier;
-        const targetPrice = Math.max(1, Number((currentPriceTmp * (1 + totalImpact)).toFixed(2)));
-        
-        const nextPoints = [...prev.chartPoints];
-        let curVal = currentPriceTmp;
-        
-        // 6 steps for impact phase
-        for (let i = 1; i <= 6; i++) {
-          const ratio = i / 6;
-          const baseInterp = currentPriceTmp + (targetPrice - currentPriceTmp) * ratio;
-          const jitterFactor = (1 - ratio) * (Math.random() * prev.currentCompany.volatility * 0.3 - prev.currentCompany.volatility * 0.15);
-          let stepVal = baseInterp * (1 + jitterFactor);
-          stepVal = Math.max(1, Number(stepVal.toFixed(2)));
-          nextPoints.push(stepVal);
-          curVal = stepVal;
-        }
-        
-        // 5 steps for cooldown phase
-        for (let i = 0; i < 5; i++) {
-          const change = curVal * (Math.random() * prev.currentCompany.volatility * 0.12 - prev.currentCompany.volatility * 0.06 + prev.currentCompany.trend * 0.04);
-          curVal = Math.max(1, Number((curVal + change).toFixed(2)));
-          nextPoints.push(curVal);
-        }
-        
-        let currentVal = 0;
-        if (prev.position) {
-          currentVal = prev.position.shares * currentPriceTmp;
-        }
-        const sessionPeak = Math.max(prev.highestCashInSession, prev.cash + currentVal);
-
-        return {
-          ...prev,
-          chartPoints: nextPoints,
-          highestCashInSession: sessionPeak
-        };
+        return nextTick;
       });
+    }, 700);
 
-      setCurrentNews(null); // Clear active news
-      setShowNewsPopup(false);
-      setTicksRemaining(11);
-      setTradingSubPhase('auto_drift_impact');
-    }
-  };
+    return () => clearInterval(intervalId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gameState.phase, roundEnded]);
 
-  // Sell Action (Cash out and end the round)
-  const handleSellTransaction = () => {
-    if (!gameState.position) {
-      if (settings.soundEnabled) playSound('click');
-      setGameState(prev => ({
-        ...prev,
-        lastRoundProfit: 0,
-        phase: 'round_complete'
-      }));
-      return;
-    }
-    
-    const currentPrice = gameState.chartPoints[activePointIndex];
-    const finalValue = gameState.position.shares * currentPrice;
-    const profit = finalValue - gameState.position.investedCash;
-
-    if (settings.soundEnabled) {
-      if (profit >= 0) {
-        playSound('win');
-      } else {
-        playSound('lose');
-      }
-    }
-
-    if (profit > 0) {
-      const gemReward = 5 + Math.floor(profit / 100);
-      setGems(prev => prev + gemReward);
-    }
-
-    setGameState(prev => {
-      const currentPriceTmp = prev.chartPoints[activePointIndex];
-      const finalValueTmp = prev.position!.shares * currentPriceTmp;
-      const roundProfit = finalValueTmp - prev.position!.investedCash;
-      const nextCash = Number((prev.cash + finalValueTmp).toFixed(2));
-      const sessionPeak = Math.max(prev.highestCashInSession, nextCash);
-
-      return {
-        ...prev,
-        cash: nextCash,
-        lastRoundProfit: roundProfit,
-        phase: 'round_complete',
-        highestCashInSession: sessionPeak
-      };
-    });
-  };
-
-  // Progress to next round (after completion)
+  // ===== PHASE: round_complete → next round or game over =====
   const handleNextRound = () => {
     if (settings.soundEnabled) playSound('click');
 
-    // First check: did they go totally broke? (0 cash)
-    if (gameState.cash < 5) {
+    // Did the player fail the round goal?
+    if (!gameState.lastRoundPassed) {
       if (settings.soundEnabled) playSound('gameover');
-      setGameState(prev => ({
-        ...prev,
-        phase: 'game_over'
-      }));
+      setGameState(prev => ({ ...prev, phase: 'game_over' }));
       return;
     }
 
-    const nextComp = getRandomCompany(playedCompanyIds.current, minVolatility);
-    playedCompanyIds.current.push(nextComp.id);
-
-    // Initial graph history for new company
-    const nextHistory: number[] = [];
-    let curPrice = nextComp.basePrice;
-    for (let i = 0; i < 10; i++) {
-      const change = curPrice * (Math.random() * nextComp.volatility * 0.4 - nextComp.volatility * 0.18 + nextComp.trend * 0.2);
-      curPrice = Math.max(1, Number((curPrice + change).toFixed(2)));
-      nextHistory.push(curPrice);
+    // Did they go broke?
+    if (gameState.cash < 5) {
+      if (settings.soundEnabled) playSound('gameover');
+      setGameState(prev => ({ ...prev, phase: 'game_over' }));
+      return;
     }
 
-    // Reset news/auto states
-    setTradingSubPhase('idle');
-    setTicksRemaining(0);
-    setCurrentNews(null);
-    setShowNewsPopup(false);
-    setCooldownTime(0);
-    setUsedNewsIds(new Set());
-    setActivePointIndex(9);
-    setTransactions([]);
-    setActionsRemaining(10);
-
+    // Advance to next round. Keep selectedRules so they pre-select in the next rule picker.
     setGameState(prev => ({
       ...prev,
-      currentCompany: nextComp,
-      chartPoints: nextHistory,
+      roundNumber: prev.roundNumber + 1,
+      roundStartCash: prev.cash,
+      currentCompany: null,
+      chartPoints: [],
       position: null,
-      phase: 'discovery',
-      roundNumber: prev.roundNumber + 1
+      phase: 'round_intro',
     }));
   };
 
-  // Game loop tick manager
-  useEffect(() => {
-    if (gameState.phase !== 'trading') return;
-
-    let intervalId: NodeJS.Timeout | null = null;
-
-    if (tradingSubPhase === 'auto_drift_init' || tradingSubPhase === 'auto_drift_impact') {
-      // Fast ticking for auto-drifts (every 250ms)
-      intervalId = setInterval(() => {
-        setActivePointIndex(prevIdx => {
-          const nextIdx = prevIdx + 1;
-          
-          setGameState(prev => {
-            const currentPriceTmp = prev.chartPoints[nextIdx] || prev.chartPoints[prev.chartPoints.length - 1];
-            let currentVal = 0;
-            if (prev.position) {
-              currentVal = prev.position.shares * currentPriceTmp;
-            }
-            const sessionPeak = Math.max(prev.highestCashInSession, prev.cash + currentVal);
-            return {
-              ...prev,
-              highestCashInSession: sessionPeak
-            };
-          });
-
-          return nextIdx;
-        });
-
-        setTicksRemaining(prev => {
-          const nextTicks = prev - 1;
-          if (nextTicks <= 0) {
-            if (intervalId) clearInterval(intervalId);
-            
-            if (tradingSubPhase === 'auto_drift_init') {
-              // Trigger news popup!
-              const { headline, id } = pickRandomHeadline(currentCompanyRef.current, usedNewsIdsRef.current);
-              setUsedNewsIds(prevSet => {
-                const copy = new Set(prevSet);
-                copy.add(id);
-                return copy;
-              });
-              setCurrentNews(headline);
-              setTradingSubPhase('news_pending');
-              if (settings.soundEnabled) playSound('click');
-            } else {
-              // End of impact drift -> immediately trigger next news!
-              const { headline, id } = pickRandomHeadline(currentCompanyRef.current, usedNewsIdsRef.current);
-              setUsedNewsIds(prevSet => {
-                const copy = new Set(prevSet);
-                copy.add(id);
-                return copy;
-              });
-              setCurrentNews(headline);
-              setTradingSubPhase('news_pending');
-              if (settings.soundEnabled) playSound('click');
-            }
-          }
-          return nextTicks;
-        });
-      }, 250);
-    }
-
-    return () => {
-      if (intervalId) clearInterval(intervalId);
-    };
-  }, [gameState.phase, tradingSubPhase]);
-
-  // Difficulty factor based on current cash (asymptotic curve)
-  const difficultyFactor = useMemo(
-    () => getDifficultyFactor(gameState.cash),
-    [gameState.cash]
-  );
-  const minVolatility = useMemo(
-    () => getMinVolatility(difficultyFactor),
-    [difficultyFactor]
-  );
-
-  // Exit trigger to submit scoring
   const handleDoneGameOver = () => {
     if (settings.soundEnabled) playSound('click');
     onFinishGame(gameState.cash, gameState.highestCashInSession, gameState.companiesTradedCount, gameState.roundNumber);
   };
 
-  // Values calculation for rendering
-  const currentPrice = gameState.chartPoints[activePointIndex] || gameState.chartPoints[gameState.chartPoints.length - 1] || 1;
-  const positionValue = gameState.position ? (gameState.position.shares * currentPrice) : 0;
-  const totalEquity = gameState.cash + positionValue;
+  // ===== Derived render values =====
+  const currentPrice = gameState.chartPoints.length > 0
+    ? gameState.chartPoints[gameState.chartPoints.length - 1]
+    : (gameState.currentCompany?.basePrice ?? 1);
+  const positionValue = gameState.position ? gameState.position.shares * currentPrice : 0;
   const totalInvested = gameState.position ? gameState.position.investedCash : 0;
-  const liveProfit = gameState.position ? (positionValue - totalInvested) : 0;
+  const liveProfit = gameState.position ? positionValue - totalInvested : 0;
   const isProfit = liveProfit >= 0;
   const returnPercent = totalInvested > 0 ? (liveProfit / totalInvested) * 100 : 0;
 
-  // Compute risk level indicator
-  const getVolatilityConfig = (v: number) => {
-    if (v < 0.20) return { label: '💎 Solid Safe', color: 'text-emerald-500 bg-emerald-50 border-emerald-300' };
-    if (v < 0.45) return { label: '⚡ Normal Swing', color: 'text-blue-500 bg-blue-50 border-blue-300' };
-    if (v < 0.70) return { label: '🚀 Highly Volatile', color: 'text-amber-500 bg-amber-50 border-amber-300' };
-    return { label: '🔥 Speculative Chaos', color: 'text-red-500 bg-red-50 border-red-300 animate-pulse' };
-  };
+  // Session-wide totals (cash + position vs. round start). These persist when
+  // the bot sells and sits in cash, so the HUD never collapses to zero mid-round.
+  const totalMoney = gameState.cash + positionValue;
+  const sessionProfit = totalMoney - gameState.roundStartCash;
+  const sessionReturnPercent = gameState.roundStartCash > 0 ? (sessionProfit / gameState.roundStartCash) * 100 : 0;
+  const isSessionProfit = sessionProfit >= 0;
+  // Holding color: black when flat in cash, green/red when holding a position.
+  const holdingColor = gameState.position
+    ? (isProfit ? 'text-emerald-600' : 'text-rose-600')
+    : 'text-slate-800';
 
-  const volConfig = getVolatilityConfig(gameState.currentCompany.volatility);
-
-  // SVG Chart points calculation mapping path
+  // SVG chart path.
   const renderChartPath = () => {
     const points = gameState.chartPoints;
+    if (points.length === 0) return { pathD: '', fillD: '', coords: [] as { x: number; y: number }[] };
     const width = 340;
     const height = 150;
     const padding = 20;
-
     const minVal = Math.min(...points) * 0.95;
     const maxVal = Math.max(...points) * 1.05;
     const valueRange = maxVal - minVal === 0 ? 1 : maxVal - minVal;
-
     const coords = points.map((p, idx) => {
-      const x = padding + (idx / (points.length - 1)) * (width - padding * 2);
+      const x = padding + (idx / Math.max(1, points.length - 1)) * (width - padding * 2);
       const y = height - padding - ((p - minVal) / valueRange) * (height - padding * 2);
       return { x, y };
     });
-
-    // Solid line (already passed / completed points)
-    let pathD_passed = '';
-    const endPassedIdx = Math.min(activePointIndex, coords.length - 1);
-    if (coords.length > 0) {
-      pathD_passed = `M ${coords[0].x} ${coords[0].y}`;
-      for (let i = 1; i <= endPassedIdx; i++) {
-        pathD_passed += ` L ${coords[i].x} ${coords[i].y}`;
-      }
-    }
-
-    // Dashed line (future pre-generated points)
-    let pathD_future = '';
-    if (activePointIndex < coords.length - 1 && coords.length > 0) {
-      pathD_future = `M ${coords[activePointIndex].x} ${coords[activePointIndex].y}`;
-      for (let i = activePointIndex + 1; i < coords.length; i++) {
-        pathD_future += ` L ${coords[i].x} ${coords[i].y}`;
-      }
-    }
-
-    // Build area fill path for passed points only
-    let fillD_passed = '';
-    if (coords.length > 0) {
-      fillD_passed = `${pathD_passed} L ${coords[endPassedIdx].x} ${height - padding} L ${coords[0].x} ${height - padding} Z`;
-    }
-
-    return { pathD_passed, pathD_future, fillD_passed, coords };
+    let pathD = `M ${coords[0].x} ${coords[0].y}`;
+    for (let i = 1; i < coords.length; i++) pathD += ` L ${coords[i].x} ${coords[i].y}`;
+    const fillD = `${pathD} L ${coords[coords.length - 1].x} ${height - padding} L ${coords[0].x} ${height - padding} Z`;
+    return { pathD, fillD, coords };
   };
-
   const chartInfo = renderChartPath();
-  const currentCoord = chartInfo.coords[Math.min(activePointIndex, chartInfo.coords.length - 1)] || { x: 0, y: 0 };
+  const currentCoord = chartInfo.coords[chartInfo.coords.length - 1] || { x: 0, y: 0 };
+
+  // Small chart for the round_complete / game_over summary pages.
+  const renderMiniChart = (points: number[], width = 260, height = 70) => {
+    if (points.length < 2) return { pathD: '', fillD: '', stroke: '#10b981' };
+    const padding = 6;
+    const minVal = Math.min(...points) * 0.97;
+    const maxVal = Math.max(...points) * 1.03;
+    const valueRange = maxVal - minVal === 0 ? 1 : maxVal - minVal;
+    const coords = points.map((p, idx) => {
+      const x = padding + (idx / Math.max(1, points.length - 1)) * (width - padding * 2);
+      const y = height - padding - ((p - minVal) / valueRange) * (height - padding * 2);
+      return { x, y };
+    });
+    let pathD = `M ${coords[0].x} ${coords[0].y}`;
+    for (let i = 1; i < coords.length; i++) pathD += ` L ${coords[i].x} ${coords[i].y}`;
+    const fillD = `${pathD} L ${coords[coords.length - 1].x} ${height - padding} L ${coords[0].x} ${height - padding} Z`;
+    const first = points[0];
+    const last = points[points.length - 1];
+    const stroke = last >= first ? '#10b981' : '#f43f5e';
+    return { pathD, fillD, stroke };
+  };
+  const miniChart = renderMiniChart(gameState.chartPoints);
 
   return (
     <div className="flex flex-col items-center h-full w-full max-w-2xl mx-auto p-1 sm:p-2 select-none">
-      
-      {/* Top Session HUD bar */}
+      {/* Top Session HUD */}
       <div id="session_hud" className="w-full flex justify-between items-center mb-2.5 bg-slate-800 text-white rounded-[24px] p-3 border-2 border-slate-800 shadow-[4px_4px_0_0_#1e293b] shrink-0">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
             <Coins className="w-4 h-4 text-yellow-400 shrink-0" />
             <div className="text-left leading-none">
-              <span className="text-[9px] font-mono uppercase tracking-wider text-slate-300 block">AVAILABLE CASH</span>
-              <span id="label_bankroll" className="font-mono text-sm font-black text-yellow-350">
-                💵 {formatMoney(gameState.cash)}
-              </span>
+              <span className="text-[9px] font-mono uppercase tracking-wider text-slate-300 block">BANKROLL</span>
+              <span className="font-mono text-sm font-black text-yellow-300">💵 {formatMoney(gameState.cash)}</span>
             </div>
           </div>
-          <div className="flex items-center gap-1 border-l border-slate-700 pl-3">
-            <div className="text-left leading-none">
-              <span className="text-[9px] font-mono uppercase tracking-wider text-slate-300 block">GEMS</span>
-              <span className="font-mono text-xs font-black text-emerald-400">
-                💎 {gems}
-              </span>
+          {gameState.position && (
+            <div className="flex items-center gap-1 border-l border-slate-700 pl-3">
+              <div className="text-left leading-none">
+                <span className="text-[9px] font-mono uppercase tracking-wider text-slate-300 block">POSITION</span>
+                <span className={`font-mono text-xs font-black ${isProfit ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {formatMoney(positionValue)}
+                </span>
+              </div>
             </div>
-          </div>
+          )}
         </div>
-
         <div className="flex items-center gap-3">
           <div className="text-right leading-none border-r border-slate-700 pr-3">
-            <span className="text-[9px] font-mono tracking-wider uppercase text-slate-300 block">ACTIONS LEFT</span>
-            <div className="flex items-center gap-1.5 justify-end">
-              <span className={`font-mono font-black text-xs ${actionsRemaining <= 2 ? 'text-red-400 animate-pulse' : 'text-yellow-400'}`}>
-                🔑 {actionsRemaining}/10
-              </span>
-              <button
-                onClick={() => {
-                  if (settings.soundEnabled) playSound('click');
-                  setShowRefillNeeded(true);
-                }}
-                className="bg-slate-700 hover:bg-slate-600 active:scale-95 text-white font-extrabold text-[8px] px-1.5 py-0.5 rounded border border-slate-600 cursor-pointer"
-              >
-                + REFILL
-              </button>
-            </div>
-          </div>
-          <div className="text-right leading-none">
             <span className="text-[9px] font-mono tracking-wider uppercase text-slate-300 block">ROUND</span>
             <span className="font-mono font-black text-xs text-slate-100">
-              #{gameState.roundNumber} <span className="text-[9px] text-yellow-400">({gameState.currentCompany.ticker})</span>
+              #{gameState.roundNumber} {currentRound.isBoss && '👹'}
             </span>
           </div>
-
+          {gameState.phase === 'trading' && (
+            <div className="text-right leading-none">
+              <span className="text-[9px] font-mono tracking-wider uppercase text-slate-300 block">TICK</span>
+              <span className="font-mono font-black text-xs text-yellow-400">{tickIndex}/{TICKS_PER_ROUND}</span>
+            </div>
+          )}
         </div>
       </div>
 
       <div className="flex-1 flex flex-col justify-center w-full min-h-0">
-      <AnimatePresence mode="wait">
-        
-        {/* Phase 1: Discovery card */}
-        {gameState.phase === 'discovery' && (
-          <motion.div
-            key="discovery"
-            initial={{ opacity: 0, scale: 0.95, y: 15 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: -15 }}
-            className="w-full"
-          >
-            {/* The Company Folder view */}
-            <div className="w-full bg-white rounded-[32px] border-4 border-slate-800 shadow-[6px_6px_0_0_#1e293b] overflow-hidden p-5 flex flex-col justify-between space-y-4">
-              
-              <div className="space-y-3.5">
-                {/* Visual Category Label */}
-                <div className="flex justify-between items-center">
-                  <span className="text-[9px] bg-slate-800 text-white font-mono font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wider">
-                    📂 DISCOVERY STAGE
-                  </span>
-                  
-                  {/* Category Stamp */}
-                  <span className="text-[10px] font-bold font-mono text-slate-500 bg-slate-50 border border-slate-200 px-2.5 py-0.5 rounded-lg flex items-center gap-1">
-                    {gameState.currentCompany.icon} {gameState.currentCompany.category}
-                  </span>
-                </div>
+        <AnimatePresence mode="wait">
 
-                {/* Company Name, Ticker and Big Title */}
-                <div className="text-center bg-yellow-50 rounded-[20px] p-4 border-2 border-dashed border-slate-350 relative">
-                  <span className="absolute -top-3 left-1/2 transform -translate-x-1/2 text-sm bg-yellow-400 border-2 border-slate-800 text-slate-800 font-black font-mono px-3 py-0.5 rounded-full shadow-[2px_2px_0_0_#1e293b]">
-                    ${gameState.currentCompany.ticker}
-                  </span>
-                  <p className="text-2xl font-black mt-2 text-slate-800 font-sans tracking-tight leading-snug">
-                    {gameState.currentCompany.name}
-                  </p>
-                  <div className={`mt-1.5 font-mono text-[9px] uppercase font-bold px-2 py-0.5 rounded-lg border inline-block ${volConfig.color.replace('border-emerald-300', 'border-slate-800').replace('border-blue-300', 'border-slate-800').replace('border-amber-300', 'border-slate-800').replace('border-red-300', 'border-slate-800')}`}>
-                    {volConfig.label}
+          {/* ===== PHASE: ROUND INTRO ===== */}
+          {gameState.phase === 'round_intro' && (
+            <motion.div
+              key="round_intro"
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: -15 }}
+              className="w-full"
+            >
+              <div className={`w-full bg-white rounded-[32px] border-4 ${currentRound.isBoss ? 'border-rose-800' : 'border-slate-800'} shadow-[6px_6px_0_0_#1e293b] overflow-hidden p-6 text-center space-y-4`}>
+                <div className="flex justify-center">
+                  <div className={`w-16 h-16 ${currentRound.isBoss ? 'bg-rose-100' : 'bg-yellow-100'} rounded-2xl border-2 border-slate-800 flex items-center justify-center shadow-[3px_3px_0_0_#1e293b]`}>
+                    <span className="text-3xl">{currentRound.emoji}</span>
                   </div>
                 </div>
-
-                {/* Company summary content */}
-                <div className="bg-slate-50 border-2 border-slate-800 rounded-[20px] p-4 space-y-2 shadow-[3px_3px_0_0_#1e293b]">
-                  <span className="text-[8px] font-mono font-bold uppercase text-slate-400 tracking-wider flex items-center gap-1">
-                    <Info className="w-3 h-3 text-slate-400" />
-                    DOSSIER SUMMARY:
+                <div>
+                  <span className={`text-[9px] font-mono ${currentRound.isBoss ? 'bg-rose-600' : 'bg-slate-800'} text-white font-bold px-3 py-1 rounded-full uppercase tracking-widest`}>
+                    {currentRound.isBoss ? '👹 BOSS ROUND' : `ROUND ${gameState.roundNumber}`}
                   </span>
-                  <p className="text-xs font-medium leading-normal text-slate-600 font-sans">
-                    {gameState.currentCompany.summary}
+                  <h2 className="text-2xl font-black mt-3 text-slate-800 font-sans tracking-tight uppercase">
+                    {currentRound.title}
+                  </h2>
+                </div>
+                <div className={`bg-slate-50 border-2 ${currentRound.isBoss ? 'border-rose-400' : 'border-slate-800'} rounded-[20px] p-4 space-y-2 shadow-[3px_3px_0_0_#1e293b]`}>
+                  <div className="flex items-center justify-center gap-1.5">
+                    <Target className="w-4 h-4 text-amber-500" />
+                    <span className="text-[10px] font-mono font-black uppercase tracking-wider text-slate-500">GOAL</span>
+                  </div>
+                  <p className="text-lg font-black text-slate-800">{currentRound.goal}</p>
+                  <p className="text-[11px] text-slate-500 leading-normal font-medium">{currentRound.description}</p>
+                </div>
+                <div className="bg-yellow-50 rounded-xl p-3 border border-yellow-200">
+                  <p className="text-[10px] text-slate-600 font-mono">
+                    Starting Bankroll: <strong className="text-slate-800 font-black">{formatMoney(gameState.cash)}</strong>
                   </p>
+                </div>
+                <div className="relative group w-full pt-1.5">
+                  <div className={`absolute inset-0 ${currentRound.isBoss ? 'bg-rose-600' : 'bg-emerald-600'} rounded-[18px] translate-y-1.5`} />
+                  <button
+                    onClick={handleStartRound}
+                    className={`relative w-full ${currentRound.isBoss ? 'bg-rose-400 hover:bg-rose-300' : 'bg-emerald-400 hover:bg-emerald-300'} border-2 border-slate-800 text-white font-black py-3 rounded-[18px] flex items-center justify-center gap-2 cursor-pointer text-xs transition-transform active:translate-y-1.5`}
+                  >
+                    <Bot className="w-4 h-4" />
+                    PICK A STOCK ➔
+                  </button>
                 </div>
               </div>
+            </motion.div>
+          )}
 
-              {/* Action options */}
-              <div className="space-y-3 pt-2">
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="relative group w-full">
-                    <div className="absolute inset-0 bg-slate-400 rounded-[18px] translate-y-1" />
-                    <button
-                      id="btn_skip_company"
-                      onClick={handleSkipCompany}
-                      className="relative w-full bg-slate-100 hover:bg-slate-200 border-2 border-slate-800 text-slate-700 font-black py-2.5 rounded-[18px] flex items-center justify-center gap-1 cursor-pointer text-xs active:translate-y-1 transition-transform"
-                    >
-                      PASS ➔
-                    </button>
+          {/* ===== PHASE: STOCK SELECT ===== */}
+          {gameState.phase === 'stock_select' && previewCompany && (
+            <motion.div
+              key="stock_select"
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: -15 }}
+              className="w-full"
+            >
+              <div className="w-full bg-white rounded-[32px] border-4 border-slate-800 shadow-[6px_6px_0_0_#1e293b] overflow-hidden p-5 flex flex-col justify-between space-y-4">
+                <div className="space-y-3.5">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[9px] bg-slate-800 text-white font-mono font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wider">
+                      📂 STOCK PICKER
+                    </span>
+                    <span className="text-[10px] font-bold font-mono text-slate-500 bg-slate-50 border border-slate-200 px-2.5 py-0.5 rounded-lg flex items-center gap-1">
+                      {previewCompany.icon} {previewCompany.category}
+                    </span>
                   </div>
 
+                  <div className="text-center bg-yellow-50 rounded-[20px] p-4 border-2 border-dashed border-slate-300 relative">
+                    <span className="absolute -top-3 left-1/2 transform -translate-x-1/2 text-sm bg-yellow-400 border-2 border-slate-800 text-slate-800 font-black font-mono px-3 py-0.5 rounded-full shadow-[2px_2px_0_0_#1e293b]">
+                      ${previewCompany.ticker}
+                    </span>
+                    <p className="text-2xl font-black mt-2 text-slate-800 font-sans tracking-tight leading-snug">
+                      {previewCompany.name}
+                    </p>
+                    <div className="mt-1.5 font-mono text-[9px] uppercase font-bold px-2 py-0.5 rounded-lg border-2 border-slate-800 inline-block bg-white text-slate-700">
+                      {previewCompany.volatility < 0.20 ? '💎 Solid Safe' :
+                       previewCompany.volatility < 0.45 ? '⚡ Normal Swing' :
+                       previewCompany.volatility < 0.70 ? '🚀 Highly Volatile' : '🔥 Speculative Chaos'}
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-50 border-2 border-slate-800 rounded-[20px] p-4 space-y-2 shadow-[3px_3px_0_0_#1e293b]">
+                    <span className="text-[8px] font-mono font-bold uppercase text-slate-400 tracking-wider flex items-center gap-1">
+                      📄 DOSSIER SUMMARY:
+                    </span>
+                    <p className="text-xs font-medium leading-normal text-slate-600 font-sans">
+                      {previewCompany.summary}
+                    </p>
+                  </div>
+                </div>
+
+                {/* SKIP / CHOOSE buttons */}
+                <div className="grid grid-cols-2 gap-3 pt-2">
+                  <div className="relative group w-full">
+                    <div className="absolute inset-0 bg-rose-600 rounded-[18px] translate-y-1" />
+                    <button
+                      onClick={handleSkipStock}
+                      className="relative w-full bg-rose-400 hover:bg-rose-300 border-2 border-slate-800 text-white font-black py-2.5 rounded-[18px] flex items-center justify-center gap-1 cursor-pointer text-xs active:translate-y-1 transition-transform"
+                    >
+                      ✕ SKIP
+                    </button>
+                  </div>
                   <div className="relative group w-full">
                     <div className="absolute inset-0 bg-emerald-600 rounded-[18px] translate-y-1" />
                     <button
-                      id="btn_trade_company"
-                      onClick={handleStartTrading}
-                      className="relative w-full bg-emerald-400 hover:bg-emerald-350 border-2 border-slate-800 text-white font-black py-2.5 rounded-[18px] flex items-center justify-center gap-1 cursor-pointer text-xs active:translate-y-1 transition-transform"
+                      onClick={handlePickStock}
+                      className="relative w-full bg-emerald-400 hover:bg-emerald-300 border-2 border-slate-800 text-white font-black py-2.5 rounded-[18px] flex items-center justify-center gap-1 cursor-pointer text-xs active:translate-y-1 transition-transform"
                     >
-                      TRADE 📈
+                      ✓ CHOOSE
                     </button>
                   </div>
                 </div>
 
                 <button
-                  id="btn_abort_game"
-                  onClick={() => {
-                    if (confirm('End this run and save your score?')) {
-                      onExitGame(gameState.cash, gameState.highestCashInSession, gameState.companiesTradedCount, gameState.roundNumber);
-                    }
-                  }}
+                  onClick={() => { if (confirm('End this run and save your score?')) onExitGame(gameState.cash, gameState.highestCashInSession, gameState.companiesTradedCount, gameState.roundNumber); }}
                   className="w-full text-center text-[10px] text-slate-400 hover:text-slate-600 hover:underline uppercase tracking-widest font-mono py-1 cursor-pointer"
                 >
-                  ◀ BACK TO MAIN MAIN
+                  ◀ QUIT RUN
                 </button>
               </div>
+            </motion.div>
+          )}
 
-            </div>
-          </motion.div>
-        )}
+          {/* ===== PHASE: RULE SELECT ===== */}
+          {gameState.phase === 'rule_select' && gameState.currentCompany && (
+            <RuleSelectPhase
+              company={gameState.currentCompany}
+              hand={ruleHand}
+              onConfirm={handleEquipRules}
+              settings={settings}
+              equipSize={RULE_EQUIP_SIZE}
+              previouslySelected={gameState.selectedRules.map(r => r.id)}
+            />
+          )}
 
-        {/* Phase 2: Active Trading view */}
-        {gameState.phase === 'trading' && (
-          <motion.div
-            key="trading"
-            initial={{ opacity: 0, scale: 0.95, y: 15 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: -15 }}
-            className="w-full flex-1 flex flex-col justify-between"
-          >
-            <div className="w-full bg-white rounded-[32px] border-4 border-slate-800 shadow-[6px_6px_0_0_#1e293b] p-4 flex-1 flex flex-col justify-between space-y-3 relative">
-              
-              <div className={`flex-1 flex flex-col justify-between space-y-3 transition-opacity duration-300 ${
-                tradingSubPhase === 'news_pending' && currentNews && showNewsPopup && !isNewsMinimized ? 'opacity-0 pointer-events-none' : 'opacity-100'
-              }`}>
-              
-              {/* Top row of rounded panel: Retreat button if subphase is idle */}
-              <div className="flex justify-between items-center w-full">
-                {tradingSubPhase === 'idle' ? (
-                  <button
-                    onClick={handleBackToDiscovery}
-                    className="bg-slate-100 hover:bg-slate-200 border-2 border-slate-800 text-slate-700 font-black px-2.5 py-1 rounded-xl flex items-center gap-1 cursor-pointer text-[10px] active:translate-y-0.5 transition-all shadow-[2px_2px_0_0_#1e293b]"
-                  >
-                    ◀ RETREAT
-                  </button>
-                ) : (
-                  <div className="w-2 h-2" />
+          {/* ===== PHASE: TRADING ===== */}
+          {gameState.phase === 'trading' && gameState.currentCompany && (
+            <motion.div
+              key="trading"
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: -15 }}
+              className="w-full flex-1 flex flex-col"
+            >
+              <div className="w-full bg-white rounded-[32px] border-4 border-slate-800 shadow-[6px_6px_0_0_#1e293b] p-4 flex-1 flex flex-col space-y-3">
+                {/* Stock header */}
+                <div className="flex justify-between items-center bg-slate-50 px-3 py-2 border-2 border-slate-800 rounded-xl font-mono shadow-[2px_2px_0_0_#1e293b]">
+                  <div className="text-left">
+                    <span className="text-sm text-slate-700 font-bold uppercase block truncate max-w-[140px]">{gameState.currentCompany.name}</span>
+                    <span className="text-sm bg-yellow-400 border border-slate-800 font-extrabold px-1.5 py-0.5 rounded">${gameState.currentCompany.ticker}</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[8px] text-slate-400 block uppercase font-bold">PRICE</span>
+                    <span className="text-sm font-black text-rose-500 animate-pulse">${currentPrice.toFixed(2)}</span>
+                  </div>
+                </div>
+
+                {/* Equipped rules */}
+                <div className="bg-slate-50 border-2 border-slate-800 rounded-xl p-2 shadow-[2px_2px_0_0_#1e293b]">
+                  <span className="text-[8px] font-mono font-bold uppercase text-slate-400 tracking-wider block mb-1.5">🤖 BOT PROGRAMMED WITH:</span>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {gameState.selectedRules.map(r => (
+                      <span key={r.id} className={`text-[9px] font-mono font-bold px-2 py-1 rounded-lg border-2 border-slate-800 ${
+                        lastBotAction?.rule?.id === r.id
+                          ? 'bg-yellow-300 text-slate-800 animate-pulse'
+                          : 'bg-white text-slate-600'
+                      }`}>
+                        {r.emoji} {r.title}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Chart */}
+                <div className="bg-slate-900 border-4 border-slate-800 rounded-[24px] p-2 relative h-[150px] flex flex-col justify-end overflow-hidden shadow-inner">
+                  <div className="absolute top-2 left-2 flex items-center gap-1.5 pointer-events-none">
+                    <span className="flex h-2 w-2 relative">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                    </span>
+                    <span className="text-[8px] text-slate-400 font-mono tracking-widest uppercase font-bold">BOT LIVE</span>
+                  </div>
+                  <svg className="w-full h-[130px] absolute bottom-2 left-0 overflow-visible">
+                    <defs>
+                      <linearGradient id="chartGradient" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#10b981" stopOpacity="0.45" />
+                        <stop offset="100%" stopColor="#10b981" stopOpacity="0.0" />
+                      </linearGradient>
+                    </defs>
+                    <path d={chartInfo.fillD} fill="url(#chartGradient)" className="transition-all duration-300 ease-out" />
+                    <path d={chartInfo.pathD} fill="none" stroke="#10b981" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" className="transition-all duration-300 ease-out" />
+                    <circle cx={currentCoord.x} cy={currentCoord.y} r="6.5" fill="#10b981" stroke="#fff" strokeWidth="2.5" className="animate-pulse" />
+
+                    {/* Buy/Sell transaction markers */}
+                    {log.filter(e => e.kind === 'action' && (e.action === 'buy' || e.action === 'sell')).map((entry, idx) => {
+                      const tx = entry as Extract<LogEntry, { kind: 'action' }>;
+                      const coord = chartInfo.coords[tx.chartIndex];
+                      if (!coord) return null;
+                      const isBuy = tx.action === 'buy';
+                      return (
+                        <g key={`tx_${idx}`} className="animate-bounce">
+                          <circle cx={coord.x} cy={coord.y} r="6.5" fill={isBuy ? '#10b981' : '#f43f5e'} stroke="#ffffff" strokeWidth="2.5" />
+                          <circle cx={coord.x} cy={coord.y} r="2.5" fill="#ffffff" />
+                          <text
+                            x={coord.x}
+                            y={coord.y - 12}
+                            textAnchor="middle"
+                            className="font-mono text-[9px] font-black fill-white select-none pointer-events-none"
+                            style={{ paintOrder: 'stroke', stroke: '#0f172a', strokeWidth: '2.5px', strokeLinejoin: 'round' }}
+                          >
+                            {isBuy ? '▲ BUY' : '▼ SELL'}
+                          </text>
+                        </g>
+                      );
+                    })}
+                  </svg>
+                </div>
+
+                {/* Last bot action banner */}
+                {lastBotAction && (
+                  <div className={`border-2 border-slate-800 rounded-xl p-2 text-center font-mono text-xs font-black shadow-[2px_2px_0_0_#1e293b] ${
+                    lastBotAction.action === 'buy' ? 'bg-emerald-50 text-emerald-700' :
+                    lastBotAction.action === 'sell' ? 'bg-rose-50 text-rose-700' : 'bg-slate-100 text-slate-600'
+                  }`}>
+                    🤖 BOT: {lastBotAction.action.toUpperCase()}
+                    {lastBotAction.rule && <span className="opacity-70"> ({lastBotAction.rule.emoji} {lastBotAction.rule.title})</span>}
+                  </div>
                 )}
-                
-                <div className="w-2 h-2" />
-              </div>
 
-              {/* Trading Sub-HUD for stock details */}
-              <div className="flex justify-between items-center bg-slate-50 px-3 py-2 border-2 border-slate-800 rounded-xl font-mono shadow-[2px_2px_0_0_#1e293b]">
-                <div className="text-left">
-                  <span className="text-sm text-slate-700 font-bold uppercase block truncate max-w-[180px]">{gameState.currentCompany.name}</span>
-                  <span className="text-sm bg-yellow-400 border border-slate-800 font-extrabold px-1.5 py-0.5 rounded font-mono text-slate-800">
-                    ${gameState.currentCompany.ticker}
-                  </span>
-                </div>
-                <div className="text-right">
-                  <span className="text-[8px] text-slate-400 block uppercase font-bold">CURRENT PRICE</span>
-                  <span className="text-sm font-black text-rose-500 animate-pulse">
-                    ${currentPrice.toFixed(2)}
-                  </span>
-                </div>
-              </div>
-
-              {/* The Live Bouncing Chart */}
-              <div className="bg-slate-900 border-4 border-slate-800 rounded-[24px] p-2 relative h-[170px] flex flex-col justify-end overflow-hidden shadow-inner select-none">
-                
-                {/* Horizontal reference lines */}
-                <div className="absolute inset-0 flex flex-col justify-between py-6 opacity-10 pointer-events-none">
-                  <div className="border-t border-dashed border-white w-full" />
-                  <div className="border-t border-dashed border-white w-full" />
-                  <div className="border-t border-dashed border-white w-full" />
-                </div>
-
-                {/* Live Floating ticker feedback text */}
-                <div className="absolute top-2 left-2 flex items-center gap-1.5 pointer-events-none">
-                  <span className="flex h-2 w-2 relative">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
-                  </span>
-                  <span className="text-[8px] text-slate-400 font-mono tracking-widest uppercase font-bold">CHIP CHART LINK</span>
-                </div>
-
-                {/* SVG Visual path */}
-                <svg className="w-full h-[140px] absolute bottom-2 left-0 overflow-visible">
-                  <defs>
-                    <linearGradient id="chartGradient" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#10b981" stopOpacity="0.45" />
-                      <stop offset="100%" stopColor="#10b981" stopOpacity="0.0" />
-                    </linearGradient>
-                  </defs>
-
-                  {/* Shaded Area Fill below line */}
-                  <path
-                    d={chartInfo.fillD_passed}
-                    fill="url(#chartGradient)"
-                    className="transition-all duration-300 ease-out"
-                  />
-
-                  {/* Core Trace Line (Passed) */}
-                  <path
-                    d={chartInfo.pathD_passed}
-                    fill="none"
-                    stroke="#10b981"
-                    strokeWidth="4"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    className="transition-all duration-300 ease-out"
-                  />
-
-                  {/* Future Pre-generated Trace Line (Dashed) */}
-                  {chartInfo.pathD_future && (
-                    <path
-                      d={chartInfo.pathD_future}
-                      fill="none"
-                      stroke="#475569"
-                      strokeWidth="2.5"
-                      strokeDasharray="4 4"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      className="opacity-60 transition-all duration-300 ease-out"
-                    />
-                  )}
-
-                  {/* Pulsing endpoint */}
-                  <circle
-                    cx={currentCoord.x}
-                    cy={currentCoord.y}
-                    r="6.5"
-                    fill="#10b981"
-                    stroke="#fff"
-                    strokeWidth="2.5"
-                    className="animate-pulse"
-                  />
-
-                  {/* Buy/Sell transaction markers */}
-                  {transactions.map((tx, idx) => {
-                    const coord = chartInfo.coords[tx.index];
-                    if (!coord) return null;
-                    const isBuy = tx.type === 'buy';
-                    return (
-                      <g key={`tx_${idx}`} className="animate-bounce">
-                        <circle
-                          cx={coord.x}
-                          cy={coord.y}
-                          r="6.5"
-                          fill={isBuy ? '#10b981' : '#f43f5e'}
-                          stroke="#ffffff"
-                          strokeWidth="2.5"
-                        />
-                        <circle
-                          cx={coord.x}
-                          cy={coord.y}
-                          r="2.5"
-                          fill="#ffffff"
-                        />
-                        <text
-                          x={coord.x}
-                          y={coord.y - 12}
-                          textAnchor="middle"
-                          className="font-mono text-[9px] font-black fill-white select-none pointer-events-none"
-                          style={{
-                            paintOrder: 'stroke',
-                            stroke: '#0f172a',
-                            strokeWidth: '2.5px',
-                            strokeLinejoin: 'round'
-                          }}
-                        >
-                          {isBuy ? '▲ BUY' : '▼ SELL'}
-                        </text>
-                      </g>
-                    );
-                  })}
-                </svg>
-              </div>
-
-              {/* Position stats log wrapper (Buy vs Value) */}
-              {gameState.position && (
-              <div className="bg-slate-50 p-4 border-2 border-slate-800 rounded-[24px] shadow-[4px_4px_0_0_#1e293b]">
-                  <div className="flex flex-col space-y-3">
-                    {/* Top primary row: large metrics */}
-                    <div className="grid grid-cols-2 gap-3 items-center">
-                      <div className="text-left">
-                        <span className="text-[9px] text-slate-400 uppercase font-bold tracking-wider font-mono block mb-1">CURRENT SHARE VALUE</span>
-                        <span className={`text-2xl sm:text-3xl font-black tracking-tighter font-mono block ${isProfit ? 'text-emerald-600' : 'text-rose-600'}`}>
-                          {formatMoney(positionValue)}
-                        </span>
-                      </div>
-                      
-                      <div className="text-right flex flex-col items-end">
-                        <span className="text-[9px] text-slate-400 uppercase font-bold tracking-wider font-mono block mb-1">TOTAL RETURN RATE</span>
-                        <div className={`inline-flex items-center gap-1.5 font-black text-base sm:text-lg font-mono px-3 py-1 rounded-2xl border-2 ${
-                          isProfit ? 'text-emerald-700 bg-emerald-50 border-emerald-400' : 'text-rose-700 bg-rose-50 border-rose-400'
-                        }`}>
-                          {isProfit ? <TrendingUp className="w-4 h-4 shrink-0" /> : <TrendingDown className="w-4 h-4 shrink-0" />}
-                          <span>{isProfit ? '+' : ''}{returnPercent.toFixed(1)}%</span>
-                        </div>
-                      </div>
+                {/* Position stats — always visible on the trading page.
+                     Shows session-wide totals so the HUD never collapses to zero
+                     when the bot sells and sits in cash. */}
+                <div className="bg-slate-50 p-3 border-2 border-slate-800 rounded-[20px] shadow-[3px_3px_0_0_#1e293b]">
+                  <div className="grid grid-cols-2 gap-3 items-center">
+                    <div className="text-left">
+                      <span className="text-[9px] text-slate-400 uppercase font-bold tracking-wider font-mono block mb-1">TOTAL MONEY</span>
+                      <span className={`text-xl font-black tracking-tighter font-mono ${holdingColor}`}>
+                        {formatMoney(totalMoney)}
+                      </span>
                     </div>
-
-                    {/* Bottom sub-row: auxiliary info */}
-                    <div className="border-t border-slate-200 pt-2.5 flex justify-between items-center text-[10px] text-slate-500 font-mono font-medium">
+                    <div className="text-right flex flex-col items-end">
+                      <span className="text-[9px] text-slate-400 uppercase font-bold tracking-wider font-mono block mb-1">TOTAL RETURN</span>
+                      <span className={`inline-flex items-center gap-1 font-black text-sm font-mono px-2 py-1 rounded-xl border-2 ${
+                        isSessionProfit ? 'text-emerald-700 bg-emerald-50 border-emerald-400' : 'text-rose-700 bg-rose-50 border-rose-400'
+                      }`}>
+                        {isSessionProfit ? <TrendingUp className="w-3 h-3 shrink-0" /> : <TrendingDown className="w-3 h-3 shrink-0" />}
+                        {isSessionProfit ? '+' : ''}{sessionReturnPercent.toFixed(1)}%
+                      </span>
+                    </div>
+                  </div>
+                  {gameState.position && (
+                    <div className="border-t border-slate-200 pt-2 mt-2 flex justify-between items-center text-[10px] text-slate-500 font-mono font-medium">
                       <div>
-                        <span>Shares Owned: </span>
-                        <strong className="text-slate-700 font-bold">{gameState.position.shares.toFixed(4)} Units</strong>
+                        <span>Shares: </span>
+                        <strong className="text-slate-700 font-bold">{gameState.position.shares.toFixed(4)}</strong>
                       </div>
                       <div className="text-right">
                         <span>Avg Entry: </span>
                         <strong className="text-slate-700 font-bold">${gameState.position.avgBuyPrice.toFixed(2)}</strong>
                         <span className="mx-1">•</span>
                         <span>Gain: </span>
-                        <strong className={`font-black ${isProfit ? 'text-emerald-600' : 'text-rose-600'}`}>
-                          {formatMoney(liveProfit)}
-                        </strong>
+                        <strong className={`font-black ${isProfit ? 'text-emerald-600' : 'text-rose-600'}`}>{formatMoney(liveProfit)}</strong>
                       </div>
                     </div>
-                    </div>
-                  </div>
-              )}
-
-              {/* Game interaction console panel */}
-              <div className="space-y-3 pt-1">
-                <AnimatePresence mode="wait">
-                  {tradingSubPhase === 'idle' && (
-                    // Default starting buttons
-                    <motion.div
-                      key="start-buttons"
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: -10 }}
-                      className="space-y-3 w-full"
-                    >
-                      <div className="text-[10px] text-slate-500 font-mono font-bold text-center tracking-wider block">
-                        CHOOSE YOUR MOVE:
-                      </div>
-                      
-                      <div className="flex justify-center">
-                        <button
-                          disabled={gameState.cash <= 0}
-                          onClick={() => handleBuyTransaction(gameState.cash)}
-                          className={`w-full border-2 border-slate-800 font-black py-3 rounded-xl flex flex-col items-center justify-center text-xs transition-transform select-none active:translate-y-0.5 shadow-[2px_2px_0_0_#1e293b] ${
-                            gameState.cash > 0
-                              ? 'bg-amber-500 hover:bg-amber-400 text-white cursor-pointer'
-                              : 'bg-slate-100 text-slate-400 opacity-40 cursor-not-allowed'
-                          }`}
-                        >
-                          <span className="text-[9px] font-mono opacity-80 uppercase tracking-widest font-extrabold">ALL IN</span>
-                          <span className="font-extrabold text-[13px]">🚀 BUY {formatMoney(gameState.cash)}</span>
-                        </button>
-                      </div>
-                    </motion.div>
                   )}
-
-                  {tradingSubPhase === 'auto_drift_init' && (
-                    <motion.div
-                      key="auto_drift_init"
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: -10 }}
-                      className="bg-slate-50 border-2 border-slate-800 rounded-[20px] p-4 text-center space-y-3 shadow-[3px_3px_0_0_#1e293b]"
-                    >
-                      <div className="flex items-center justify-center gap-2 text-slate-700">
-                        <span className="flex h-3 w-3 relative">
-                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-450 opacity-75"></span>
-                          <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
-                        </span>
-                        <span className="font-mono text-xs font-black uppercase tracking-wider">
-                          📊 SIMULATING MARKET DRIFT...
-                        </span>
-                      </div>
-                      <p className="text-[10px] text-slate-500 leading-normal max-w-[240px] mx-auto font-sans font-medium">
-                        The market is adjusting. Price movement is minimal before upcoming breaking news.
-                      </p>
-                      <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden border border-slate-800">
-                        <motion.div 
-                          className="bg-blue-500 h-full rounded-full"
-                          initial={{ width: "0%" }}
-                          animate={{ width: `${((5 - ticksRemaining) / 5) * 100}%` }}
-                          transition={{ ease: "linear", duration: 0.25 }}
-                        />
-                      </div>
-                    </motion.div>
-                  )}
-
-                  {tradingSubPhase === 'auto_drift_impact' && (
-                    <motion.div
-                      key="auto_drift_impact"
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: -10 }}
-                      className="bg-slate-50 border-2 border-slate-800 rounded-[20px] p-4 text-center space-y-3 shadow-[3px_3px_0_0_#1e293b]"
-                    >
-                      <div className="flex items-center justify-center gap-2">
-                        {currentNewsRef.current?.sentiment === 'positive' && (
-                          <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-full border-2 border-emerald-300 text-[10px] font-mono font-black uppercase tracking-wider animate-bounce flex items-center gap-1">
-                            🚀 BULLISH RALLY ACTIVE
-                          </span>
-                        )}
-                        {currentNewsRef.current?.sentiment === 'negative' && (
-                          <span className="px-2.5 py-1 bg-rose-50 text-rose-700 rounded-full border-2 border-rose-300 text-[10px] font-mono font-black uppercase tracking-wider animate-bounce flex items-center gap-1">
-                            🔥 BEARISH SELL-OFF ACTIVE
-                          </span>
-                        )}
-                        {currentNewsRef.current?.sentiment === 'neutral' && (
-                          <span className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded-full border-2 border-slate-300 text-[10px] font-mono font-black uppercase tracking-wider animate-pulse flex items-center gap-1">
-                            ➡️ NEUTRAL MARKET DRIFT
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-[10px] text-slate-500 leading-normal max-w-[240px] mx-auto font-sans font-medium">
-                        Solving headline impact. Watch price changes react on the trace chart in real time!
-                      </p>
-                      <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden border border-slate-800">
-                        <motion.div 
-                          className={`h-full rounded-full ${
-                            currentNewsRef.current?.sentiment === 'positive' ? 'bg-emerald-500' :
-                            currentNewsRef.current?.sentiment === 'negative' ? 'bg-rose-500' : 'bg-slate-500'
-                          }`}
-                          initial={{ width: "0%" }}
-                          animate={{ width: `${((11 - ticksRemaining) / 11) * 100}%` }}
-                          transition={{ ease: "linear", duration: 0.25 }}
-                        />
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-
-              </div>
-
-              {tradingSubPhase === 'news_pending' && currentNews && showNewsPopup && !isNewsMinimized && (
-                <div className="absolute inset-0 z-50 flex items-center justify-center p-3">
-                  <motion.div
-                    key="news_pending"
-                    initial={{ opacity: 0, scale: 0.9, y: 15 }}
-                    animate={{ opacity: 1, scale: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.9, y: -15 }}
-                    className="w-full bg-slate-900 text-white border-4 border-slate-800 rounded-[24px] p-4 shadow-[4px_4px_0_0_#1e293b] space-y-3.5 relative"
-                  >
-                    {/* Header row with Red Breaking News Flash bar & Minimize button */}
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex-1 flex justify-center items-center bg-red-600 px-3 py-1.5 rounded-lg border-2 border-slate-800 text-white font-black font-mono text-sm uppercase tracking-widest animate-pulse">
-                        <span className="flex items-center gap-1.5">
-                          <Newspaper className="w-4 h-4 shrink-0" />
-                          Insider Tip
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (settings.soundEnabled) playSound('click');
-                          setIsNewsMinimized(true);
-                        }}
-                        className="bg-slate-800 hover:bg-slate-750 active:scale-95 text-slate-300 hover:text-white border-2 border-slate-700 px-2.5 py-1 rounded-lg font-mono text-[9px] font-black uppercase flex items-center gap-1 cursor-pointer select-none transition-all shadow-[1px_1px_0_0_#1e293b]"
-                        title="Minimize breaking news popup"
-                      >
-                        ➖ MINIMIZE
-                      </button>
-                    </div>
-
-                    {/* Headline text */}
-                    <div className="bg-slate-800/80 border-2 border-slate-700/60 rounded-xl p-3">
-                      <p className="text-xs font-bold leading-normal font-sans tracking-tight text-yellow-100">
-                        "{currentNews.text}"
-                      </p>
-                    </div>
-
-                    {/* Current Stock Holdings Value and Returns display */}
-                    <div className="bg-slate-800/50 border-2 border-slate-700/40 rounded-xl p-3 flex items-center justify-between text-xs font-mono">
-                      <div className="flex flex-col text-left">
-                        <span className="text-[9px] text-slate-400 uppercase font-black tracking-wider">Holdings Value</span>
-                        <span className="text-lg font-extrabold text-slate-100">
-                          {gameState.position 
-                            ? formatMoney(positionValue)
-                            : '$0.00'
-                          }
-                        </span>
-                      </div>
-                      <div className="flex flex-col text-right">
-                        <span className="text-[9px] text-slate-400 uppercase font-black tracking-wider">Return</span>
-                        {gameState.position ? (
-                          <span className={`inline-flex items-center gap-1 font-extrabold text-lg font-mono ${
-                            liveProfit > 0 ? 'text-emerald-400' : liveProfit < 0 ? 'text-rose-400' : 'text-slate-400'
-                          }`}>
-                            {liveProfit > 0 ? <TrendingUp className="w-4 h-4 shrink-0" /> : liveProfit < 0 ? <TrendingDown className="w-4 h-4 shrink-0" /> : null}
-                            {returnPercent !== 0 ? `${returnPercent.toFixed(1)}%` : '0.0%'}
-                            <span className="text-xs opacity-75 ml-0.5">
-                              ({formatMoney(liveProfit)})
-                            </span>
-                          </span>
-                        ) : (
-                          <span className="text-sm font-extrabold text-slate-500">NO ACTIVE SHARES</span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Simple Casual Action Buttons — all in one row */}
-                    <div className="grid grid-cols-4 gap-1.5">
-                        {/* ALL IN */}
-                        <button
-                          type="button"
-                          disabled={gameState.cash < 1}
-                          onClick={() => { handleBuyTransaction(gameState.cash); }}
-                          className={`font-mono font-black text-[10px] py-2.5 rounded-xl flex items-center justify-center gap-1 transition-transform border-2 border-slate-800 shadow-[2px_2px_0_0_#1e293b] select-none active:translate-y-0.5 ${
-                            gameState.cash >= 1
-                              ? 'bg-emerald-500 hover:bg-emerald-450 text-white cursor-pointer'
-                              : 'bg-slate-800 text-slate-500 border-slate-800 opacity-40 cursor-not-allowed'
-                          }`}
-                        >
-                          🚀 BUY
-                        </button>
-
-                        {/* SELL ALL */}
-                        <button
-                          type="button"
-                          disabled={!gameState.position}
-                          onClick={() => {
-                            const maxVal = gameState.position ? gameState.position.shares * currentPrice : 0;
-                            handlePartialSellTransaction(maxVal);
-                          }}
-                          className={`font-mono font-black text-[10px] py-2.5 rounded-xl flex items-center justify-center gap-1 transition-transform border-2 border-slate-800 shadow-[2px_2px_0_0_#1e293b] select-none active:translate-y-0.5 ${
-                            gameState.position
-                              ? 'bg-rose-500 hover:bg-rose-450 text-white cursor-pointer'
-                              : 'bg-slate-800 text-slate-500 border-slate-800 opacity-40 cursor-not-allowed'
-                          }`}
-                        >
-                          💰 SELL
-                        </button>
-
-                        {/* HOLD */}
-                        <button
-                          type="button"
-                          id="btn_news_hold"
-                          onClick={handleHoldAction}
-                          className="bg-slate-800 hover:bg-slate-750 border-2 border-slate-700 text-slate-100 font-mono font-black py-2.5 rounded-xl flex items-center justify-center gap-1 cursor-pointer text-[10px] active:translate-y-0.5 transition-transform shadow-[2px_2px_0_0_#1e293b]"
-                        >
-                          ✊ HOLD
-                        </button>
-
-                        {/* CASH OUT */}
-                        <button
-                          type="button"
-                          id="btn_news_sell_all"
-                          onClick={handleSellTransaction}
-                          className="bg-amber-500 hover:bg-amber-450 text-slate-950 font-mono font-black text-[10px] py-2.5 border-2 border-slate-800 rounded-xl flex items-center justify-center gap-1 cursor-pointer transition-transform active:translate-y-0.5 shadow-[2px_2px_0_0_#1e293b]"
-                        >
-                          💵 OUT
-                        </button>
-                    </div>
-
-                  </motion.div>
                 </div>
-              )}
 
-            </div>
+                {/* News + action log — collapsed by default, expandable */}
+                <div className="bg-slate-50 border-2 border-slate-800 rounded-[20px] shadow-[3px_3px_0_0_#1e293b] flex flex-col overflow-hidden">
+                  <button
+                    onClick={() => setNewsExpanded(v => !v)}
+                    className="w-full flex items-center justify-between px-2 py-1.5 cursor-pointer text-left"
+                  >
+                    <span className="text-[8px] font-mono font-bold uppercase text-slate-400 tracking-wider">📰 BREAKING NEWS & BOT LOG</span>
+                    <span className="text-[8px] font-mono font-bold text-slate-500">{newsExpanded ? '▲ HIDE' : '▼ SHOW'}</span>
+                  </button>
+                  {/* Latest entry preview — always 1 line, fixed height */}
+                  <div className="px-2 pb-1.5 h-[18px] overflow-hidden whitespace-nowrap text-ellipsis">
+                    {log.length === 0 ? (
+                      <p className="text-[10px] text-slate-400 font-mono">Waiting for the bot to start trading...</p>
+                    ) : (() => {
+                      const latest = log[log.length - 1];
+                      if (latest.kind === 'news') {
+                        return <p className="text-[10px] font-bold text-slate-700 truncate">📰 "{latest.news.text}"</p>;
+                      }
+                      return (
+                        <p className={`text-[10px] font-mono font-bold truncate ${
+                          latest.action === 'buy' ? 'text-emerald-700' :
+                          latest.action === 'sell' ? 'text-rose-700' : 'text-slate-500'
+                        }`}>
+                          🤖 BOT {latest.action.toUpperCase()} @ ${latest.price.toFixed(2)}
+                          {latest.rule && <span className="opacity-70"> · {latest.rule.emoji} {latest.rule.title}</span>}
+                        </p>
+                      );
+                    })()}
+                  </div>
+                  {newsExpanded && (
+                    <div className="border-t-2 border-slate-200 p-2 max-h-[180px] overflow-y-auto">
+                      <div className="space-y-1.5">
+                        {log.slice().reverse().map((entry, idx) => {
+                          if (entry.kind === 'news') {
+                            const meta = MAGNITUDE_META[entry.news.magnitude];
+                            return (
+                              <div key={`log_${idx}`} className={`border-2 border-slate-300 rounded-lg p-2 ${meta.chipColor}`}>
+                                <div className="flex items-center justify-between mb-0.5">
+                                  <span className="text-[8px] font-mono font-black uppercase tracking-wider opacity-80">📰 {entry.news.source}</span>
+                                  <span className="text-[8px] font-mono font-black px-1.5 py-0.5 rounded border border-slate-800 bg-white">{meta.emoji} {meta.label}</span>
+                                </div>
+                                <p className="text-[10px] font-bold leading-snug">"{entry.news.text}"</p>
+                              </div>
+                            );
+                          } else {
+                            const isBuy = entry.action === 'buy';
+                            const isSell = entry.action === 'sell';
+                            return (
+                              <div key={`log_${idx}`} className={`text-[10px] font-mono font-bold px-2 py-1 rounded-lg border ${
+                                isBuy ? 'bg-emerald-50 text-emerald-700 border-emerald-300' :
+                                isSell ? 'bg-rose-50 text-rose-700 border-rose-300' :
+                                'bg-slate-100 text-slate-500 border-slate-300'
+                              }`}>
+                                🤖 BOT {entry.action.toUpperCase()} @ ${entry.price.toFixed(2)}
+                                {entry.rule && <span className="opacity-70"> · {entry.rule.emoji} {entry.rule.title}</span>}
+                              </div>
+                            );
+                          }
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
 
-            {/* "Next" button to open breaking news popup */}
-            {tradingSubPhase === 'news_pending' && currentNews && !showNewsPopup && (
-              <motion.div
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="mt-3 flex justify-center w-full"
-              >
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (settings.soundEnabled) playSound('click');
-                    setShowNewsPopup(true);
-                  }}
-                  className="w-full bg-red-600 hover:bg-red-500 text-white font-black font-mono text-xs py-2.5 px-4 border-4 border-slate-800 rounded-2xl shadow-[4px_4px_0_0_#1e293b] flex items-center justify-between gap-2 cursor-pointer select-none animate-pulse active:translate-y-0.5 transition-transform"
-                >
-                  <span className="flex items-center gap-1.5 text-[11px] tracking-wide">
-                    <Newspaper className="w-4 h-4 shrink-0 text-yellow-300" />
-                    🚨  INSIDER TIP INCOMING!
-                  </span>
-                  <span className="bg-slate-900 border-2 border-slate-800 text-yellow-300 text-[10px] font-black px-2.5 py-1 rounded-lg">
-                    NEXT ➜
-                  </span>
-                </button>
-              </motion.div>
-            )}
+                {/* Progress bar */}
+                <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden border border-slate-800">
+                  <motion.div
+                    className="bg-emerald-500 h-full rounded-full"
+                    animate={{ width: `${(tickIndex / TICKS_PER_ROUND) * 100}%` }}
+                    transition={{ ease: 'linear', duration: 0.5 }}
+                  />
+                </div>
+              </div>
+            </motion.div>
+          )}
 
-            {/* Minimized Breaking News Bottom Indicator Row */}
-            {tradingSubPhase === 'news_pending' && currentNews && showNewsPopup && isNewsMinimized && (
-              <motion.div
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="mt-3 flex justify-center w-full"
-              >
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (settings.soundEnabled) playSound('click');
-                    setIsNewsMinimized(false);
-                  }}
-                  className="w-full bg-red-600 hover:bg-red-500 text-white font-black font-mono text-xs py-2.5 px-4 border-4 border-slate-800 rounded-2xl shadow-[4px_4px_0_0_#1e293b] flex items-center justify-between gap-2 cursor-pointer select-none animate-pulse active:translate-y-0.5 transition-transform"
-                >
-                  <span className="flex items-center gap-1.5 text-[11px] tracking-wide">
-                    <Newspaper className="w-4 h-4 shrink-0 text-yellow-300" />
-                    🚨 PENDING INSIDER TIP!
+          {/* ===== PHASE: ROUND COMPLETE ===== */}
+          {gameState.phase === 'round_complete' && gameState.lastRoundEvalContext && (
+            <motion.div
+              key="round_complete"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="w-full flex-1 flex flex-col justify-center"
+            >
+              <div className={`w-full bg-white rounded-[32px] border-4 ${gameState.lastRoundPassed ? 'border-emerald-800' : 'border-rose-800'} shadow-[8px_8px_0_0_#1e293b] p-6 text-center space-y-4`}>
+                <div className="flex justify-center">
+                  <div className={`w-16 h-16 ${gameState.lastRoundPassed ? 'bg-emerald-100' : 'bg-rose-100'} rounded-2xl border-2 border-slate-800 flex items-center justify-center shadow-[3px_3px_0_0_#1e293b]`}>
+                    {gameState.lastRoundPassed ? <Check className="w-8 h-8 text-emerald-600" /> : <Skull className="w-8 h-8 text-rose-600 animate-bounce" />}
+                  </div>
+                </div>
+                <div>
+                  <span className={`text-[9px] font-mono ${gameState.lastRoundPassed ? 'bg-emerald-600' : 'bg-rose-600'} text-white font-bold px-3 py-1 rounded-full uppercase tracking-widest`}>
+                    {gameState.lastRoundPassed ? '✅ GOAL MET' : '❌ GOAL FAILED'}
                   </span>
-                  <span className="bg-slate-900 border-2 border-slate-800 text-yellow-300 text-[10px] font-black px-2.5 py-1 rounded-lg">
-                    EXPAND ➕
-                  </span>
-                </button>
-              </motion.div>
-            )}
-          </motion.div>
-        )}
-
-        {/* Phase 3: Round results overview screen */}
-        {gameState.phase === 'round_complete' && (
-          <motion.div
-            key="round_complete"
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.95 }}
-            className="w-full flex-1 flex flex-col justify-center"
-          >
-            <div className="w-full bg-white rounded-[32px] border-4 border-slate-800 shadow-[8px_8px_0_0_#1e293b] p-6 text-center space-y-5">
-              
-              <div className="flex justify-center">
-                {gameState.lastRoundProfit >= 0 ? (
-                  <div className="w-14 h-14 bg-emerald-100 rounded-2xl border-2 border-slate-850 flex items-center justify-center relative shadow-[3px_3px_0_0_#1e293b]">
-                    <Sparkles className="w-7 h-7 text-emerald-600 animate-spin" />
+                  <h3 className="text-xl font-black mt-3 text-slate-800 uppercase">
+                    {gameState.lastRoundPassed ? 'ROUND CLEARED!' : 'ROUND FAILED'}
+                  </h3>
+                  <p className="text-[10px] text-slate-500 mt-1 font-mono">Goal: {currentRound.goal}</p>
+                </div>
+                {/* Mini chart of this round's price action */}
+                {gameState.chartPoints.length >= 2 && (
+                  <div className="bg-slate-900 border-2 border-slate-800 rounded-[16px] p-1.5 shadow-[3px_3px_0_0_#1e293b]">
+                    <div className="flex items-center justify-between px-1 pb-1">
+                      <span className="text-[8px] text-slate-400 font-mono tracking-widest uppercase font-bold">{gameState.currentCompany?.ticker} · PRICE</span>
+                      <span className={`text-[8px] font-mono font-bold ${miniChart.stroke === '#10b981' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {currentPrice >= gameState.chartPoints[0] ? '▲' : '▼'} {formatMoney(currentPrice)}
+                      </span>
+                    </div>
+                    <svg viewBox="0 0 260 70" className="w-full h-[60px] overflow-visible">
+                      <defs>
+                        <linearGradient id="miniChartGrad" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor={miniChart.stroke} stopOpacity="0.4" />
+                          <stop offset="100%" stopColor={miniChart.stroke} stopOpacity="0.0" />
+                        </linearGradient>
+                      </defs>
+                      <path d={miniChart.fillD} fill="url(#miniChartGrad)" />
+                      <path d={miniChart.pathD} fill="none" stroke={miniChart.stroke} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </div>
+                )}
+                <div className="bg-slate-50 border-2 border-slate-800 rounded-[20px] p-4 space-y-2.5 font-mono text-xs shadow-[3px_3px_0_0_#1e293b] text-left">
+                  <div className="flex justify-between text-slate-500 font-bold">
+                    <span>Start Bankroll:</span>
+                    <span className="text-slate-800">{formatMoney(gameState.lastRoundEvalContext.startCash)}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-500 font-bold">
+                    <span>End Bankroll:</span>
+                    <span className="text-slate-800">{formatMoney(gameState.lastRoundEvalContext.endCash)}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-500 font-bold">
+                    <span>Round Profit:</span>
+                    <span className={gameState.lastRoundProfit >= 0 ? 'text-emerald-600' : 'text-rose-600'}>
+                      {gameState.lastRoundProfit >= 0 ? '+' : ''}{formatMoney(gameState.lastRoundProfit)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-slate-500 font-bold">
+                    <span>Return:</span>
+                    <span className={gameState.lastRoundEvalContext.returnPercent >= 0 ? 'text-emerald-600' : 'text-rose-600'}>
+                      {gameState.lastRoundEvalContext.returnPercent >= 0 ? '+' : ''}{gameState.lastRoundEvalContext.returnPercent.toFixed(1)}%
+                    </span>
+                  </div>
+                  <div className="border-t-2 border-dashed border-slate-200 pt-2.5 flex justify-between text-slate-500 font-bold">
+                    <span>Trades:</span>
+                    <span className="text-slate-800">{gameState.lastRoundEvalContext.tradesCount}</span>
+                  </div>
+                </div>
+                {gameState.lastRoundPassed ? (
+                  <div className="relative group w-full pt-1.5">
+                    <div className="absolute inset-0 bg-emerald-600 rounded-[18px] translate-y-1.5" />
+                    <button
+                      onClick={handleNextRound}
+                      className="relative w-full bg-emerald-400 hover:bg-emerald-300 border-2 border-slate-800 text-white font-black py-3 rounded-[18px] flex items-center justify-center gap-2 cursor-pointer text-xs transition-transform active:translate-y-1.5"
+                    >
+                      NEXT ROUND ➔
+                    </button>
                   </div>
                 ) : (
-                  <div className="w-14 h-14 bg-rose-100 rounded-2xl border-2 border-slate-850 flex items-center justify-center relative shadow-[3px_3px_0_0_#1e293b]">
-                    <Skull className="w-7 h-7 text-rose-600 animate-bounce" />
+                  <div className="relative group w-full pt-1.5">
+                    <div className="absolute inset-0 bg-rose-600 rounded-[18px] translate-y-1.5" />
+                    <button
+                      onClick={handleDoneGameOver}
+                      className="relative w-full bg-rose-400 hover:bg-rose-300 border-2 border-slate-800 text-white font-black py-3 rounded-[18px] flex items-center justify-center gap-2 cursor-pointer text-xs transition-transform active:translate-y-1.5"
+                    >
+                      <Skull className="w-4 h-4" /> RUN OVER
+                    </button>
                   </div>
                 )}
               </div>
-
-              <div>
-                <span className="text-[9px] font-mono bg-slate-100 text-slate-500 border border-slate-200 rounded-full px-3 py-1 font-extrabold uppercase">
-                  ROUND #{gameState.roundNumber} COMPLETED
-                </span>
-                <h3 className="text-xl font-black mt-3 text-slate-800 leading-tight uppercase font-sans">
-                  {gameState.lastRoundProfit >= 0 ? 'LIQUIDITY CLAIMED!' : 'TRADE SETTLED'}
-                </h3>
-              </div>
-
-              {/* Profit Metrics Box */}
-              <div className="bg-slate-50 border-2 border-slate-800 rounded-[20px] p-4 space-y-2.5 font-mono text-xs shadow-[3px_3px_0_0_#1e293b]">
-                <div className="flex justify-between text-[11px] text-slate-450 font-bold">
-                  <span>Ticker Token</span>
-                  <span className="font-extrabold text-slate-800">${gameState.currentCompany.ticker}</span>
-                </div>
-                <div className="flex justify-between text-[11px] text-slate-450 font-bold">
-                  <span>Settlement Quote</span>
-                  <span className="font-extrabold text-slate-800">${currentPrice.toFixed(2)}</span>
-                </div>
-                <div className="border-t-2 border-dashed border-slate-200 pt-2.5 flex justify-between items-center">
-                  <span className="text-[10px] font-extrabold text-slate-800 uppercase">ROUND GAIN:</span>
-                  <span className={`text-sm font-black ${
-                    gameState.lastRoundProfit >= 0 ? 'text-emerald-600' : 'text-rose-600'
-                  }`}>
-                    {gameState.lastRoundProfit >= 0 ? '+' : ''}${gameState.lastRoundProfit.toFixed(2)}
-                  </span>
-                </div>
-              </div>
-
-              <div className="bg-yellow-50 rounded-xl p-3 border border-yellow-200">
-                <p className="text-[10px] text-slate-600 font-mono">
-                  New Capital Balance: <strong className="text-slate-800 font-black">{formatMoney(gameState.cash)}</strong>
-                </p>
-              </div>
-
-              {gameState.lastRoundProfit > 0 && (
-                <div className="bg-emerald-50 text-emerald-800 rounded-2xl p-3 border-2 border-emerald-300 flex items-center justify-between font-mono text-xs shadow-[2px_2px_0_0_#1e293b]">
-                  <span className="font-extrabold flex items-center gap-1">💎 INTEL BONUS:</span>
-                  <span className="font-black text-emerald-600">+{5 + Math.floor(gameState.lastRoundProfit / 100)} GEMS ACCRUED</span>
-                </div>
-              )}
-
-              <div className="relative group w-full pt-1.5">
-                <div className="absolute inset-0 bg-emerald-600 rounded-[18px] translate-y-1.5" />
-                <button
-                  id="btn_continue_next_round"
-                  onClick={handleNextRound}
-                  className="relative w-full bg-emerald-400 hover:bg-emerald-355 border-2 border-slate-800 text-white font-black py-3 rounded-[18px] flex items-center justify-center gap-1 cursor-pointer text-xs transition-transform active:translate-y-1.5"
-                >
-                  DISCOVER NEXT STOCK ➔
-                </button>
-              </div>
-            </div>
-          </motion.div>
-        )}
-
-        {/* Phase 4: Game Over screen */}
-        {gameState.phase === 'game_over' && (
-          <motion.div
-            key="game_over"
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.95 }}
-            className="w-full flex-1 flex flex-col justify-center"
-          >
-            <div className="w-full bg-white rounded-[32px] border-4 border-slate-800 shadow-[8px_8px_0_0_#1e293b] p-6 text-center space-y-5">
-              
-              <div className="flex justify-center">
-                <div className="w-16 h-16 bg-red-100 rounded-2xl border-2 border-slate-800 flex items-center justify-center shadow-[3px_3px_0_0_#1e293b]">
-                  <Skull className="w-8 h-8 text-rose-500 animate-bounce" />
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <h3 className="text-2xl font-black text-slate-800 font-sans tracking-tight uppercase">GAME OVER!</h3>
-                <p className="text-[9px] font-mono uppercase tracking-widest text-slate-450 font-bold">⚡ CAPITAL DEEP BUSTED ⚡</p>
-              </div>
-
-              {/* High score/Progress breakdown */}
-              <div className="bg-slate-50 border-2 border-slate-800 rounded-[20px] p-4 space-y-2.5 font-mono text-[11px] text-left shadow-[3px_3px_0_0_#1e293b]">
-                <div className="flex justify-between text-slate-500 font-bold">
-                  <span>Rounds Played:</span>
-                  <span className="font-extrabold text-slate-800">{gameState.roundNumber - 1}</span>
-                </div>
-                <div className="flex justify-between text-slate-500 font-bold">
-                  <span>Companies Traded:</span>
-                  <span className="font-extrabold text-slate-800">{gameState.companiesTradedCount}</span>
-                </div>
-                <div className="flex justify-between text-slate-500 font-bold">
-                  <span>Peak Bankroll Achieved:</span>
-                  <span className="font-extrabold text-emerald-600">{formatMoney(gameState.highestCashInSession)}</span>
-                </div>
-                <div className="border-t border-slate-200 pt-2.5 flex justify-between items-center">
-                  <span className="font-extrabold text-slate-800">Rank Level:</span>
-                  <span className="bg-slate-850 bg-slate-800 text-yellow-300 font-black text-[8px] px-2.5 py-0.5 rounded-full uppercase tracking-wider">
-                    {gameState.highestCashInSession > 10000 ? '👑 GIGA WHALE' :
-                     gameState.highestCashInSession > 5000 ? '🚀 PRO GRINDER' :
-                     gameState.highestCashInSession > 2000 ? '🦁 BOBA BARON' : '🐹 PENNY BUSTED'}
-                  </span>
-                </div>
-              </div>
-
-              <div className="relative group w-full pt-1.5">
-                <div className="absolute inset-0 bg-yellow-600 rounded-[18px] translate-y-1.5" />
-                <button
-                  id="btn_done_game_over"
-                  onClick={handleDoneGameOver}
-                  className="relative w-full bg-yellow-400 hover:bg-yellow-355  border-2 border-slate-800 text-slate-805 text-slate-800 font-extrabold py-3 rounded-[18px] flex items-center justify-center gap-1 cursor-pointer text-xs transition-transform active:translate-y-1.5"
-                >
-                  SUBMIT & EXIT TO MENU
-                </button>
-              </div>
-            </div>
-          </motion.div>
-        )}
-
-      </AnimatePresence>
-      </div>
-
-      {/* Refill / Exchange Confidential Modal Overlay */}
-      <AnimatePresence>
-        {showRefillNeeded && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 font-sans"
-          >
-            <motion.div 
-              initial={{ scale: 0.95, y: 15 }}
-              animate={{ scale: 1, y: 0 }}
-              exit={{ scale: 0.95, y: 15 }}
-              className="w-full max-w-md bg-white rounded-[32px] border-4 border-slate-800 shadow-[8px_8px_0_0_#1e293b] overflow-hidden p-5 space-y-4 text-left"
-            >
-              <div className="flex justify-between items-center pb-2 border-b-2 border-slate-100">
-                <div className="flex items-center gap-1.5 text-left">
-                  <span className="text-2xl">🤫</span>
-                  <div className="text-left">
-                    <h3 className="text-sm font-black text-slate-800 uppercase tracking-tight">CONFIDENTIAL REFILL ZONE</h3>
-                    <p className="text-[9px] text-slate-400 font-mono uppercase tracking-widest leading-none mt-0.5">Off-market transactions</p>
-                  </div>
-                </div>
-                <button 
-                  onClick={() => {
-                    if (settings.soundEnabled) playSound('click');
-                    setShowRefillNeeded(false);
-                  }}
-                  className="w-8 h-8 rounded-full border-2 border-slate-800 bg-slate-100 flex items-center justify-center text-xs font-black cursor-pointer shadow-[2px_2px_0_0_#1e293b] active:translate-x-0.5 active:translate-y-0.5 transition-transform"
-                >
-                  ✕
-                </button>
-              </div>
-
-              {/* Stats Box */}
-              <div className="grid grid-cols-2 gap-2 bg-slate-900 text-white rounded-2xl p-3 font-mono text-xs border-2 border-slate-800">
-                <div className="text-left">
-                  <p className="text-[8px] text-slate-400 uppercase font-bold mb-0.5">Actions</p>
-                  <p className="font-black text-yellow-400">{actionsRemaining} / 10 Actions</p>
-                </div>
-                <div className="text-right border-l border-slate-800 pl-3">
-                  <p className="text-[8px] text-slate-400 uppercase font-bold mb-0.5">Off-market Gems</p>
-                  <p className="font-black text-emerald-400">💎 {gems} Gems</p>
-                </div>
-              </div>
-
-              {/* Offers List */}
-              <div className="space-y-3">
-                
-                {/* Offer 1: Gem to Actions */}
-                <div className="bg-slate-50 border-2 border-slate-800 rounded-2xl p-3 flex justify-between items-center text-xs text-left">
-                  <div className="text-left">
-                    <h4 className="font-black text-slate-800 uppercase text-[11px]">Bribe for +10 Actions</h4>
-                    <p className="text-[9px] text-slate-400 font-mono mt-0.5">Requires 15 Off-market Gems</p>
-                  </div>
-                  <button
-                    disabled={gems < 15}
-                    onClick={() => {
-                      if (settings.soundEnabled) playSound('click');
-                      setGems(prev => Math.max(0, prev - 15));
-                      setActionsRemaining(prev => prev + 10);
-                    }}
-                    className={`font-black text-[10px] px-3 py-2 rounded-xl border-2 border-slate-850 shadow-[2px_2px_0_0_#1e293b] transition-transform active:translate-y-0.5 ${
-                      gems >= 15 
-                        ? 'bg-yellow-400 hover:bg-yellow-350 text-slate-800 cursor-pointer' 
-                        : 'bg-slate-200 text-slate-400 border-slate-300 shadow-none cursor-not-allowed'
-                    }`}
-                  >
-                    💎 15 GEMS
-                  </button>
-                </div>
-
-                {/* Offer 2: Cash to Gems */}
-                <div className="bg-slate-50 border-2 border-slate-800 rounded-2xl p-3 flex justify-between items-center text-xs text-left">
-                  <div className="text-left">
-                    <h4 className="font-black text-slate-800 uppercase text-[11px]">Launder Cash for +20 Gems</h4>
-                    <p className="text-[9px] text-slate-400 font-mono mt-0.5">Trade standard cash reserve</p>
-                  </div>
-                  <button
-                    disabled={gameState.cash < 300}
-                    onClick={() => {
-                      if (settings.soundEnabled) playSound('click');
-                      setGems(prev => prev + 20);
-                      setGameState(prev => ({
-                        ...prev,
-                        cash: Number(Math.max(0, prev.cash - 300).toFixed(2))
-                      }));
-                    }}
-                    className={`font-black text-[10px] px-3 py-2 rounded-xl border-2 border-slate-850 shadow-[2px_2px_0_0_#1e293b] transition-transform active:translate-y-0.5 ${
-                      gameState.cash >= 300 
-                        ? 'bg-emerald-400 hover:bg-emerald-350 text-white cursor-pointer' 
-                        : 'bg-slate-200 text-slate-400 border-slate-300 shadow-none cursor-not-allowed'
-                    }`}
-                  >
-                    💵 $300 CASH
-                  </button>
-                </div>
-
-                {/* Offer 3: Bribe Informant Cooldown (FREE Actions) */}
-                <div className="bg-slate-50 border-2 border-slate-800 rounded-2xl p-3 flex justify-between items-center text-xs text-left">
-                  <div className="text-left">
-                    <h4 className="font-black text-slate-800 uppercase text-[11px]">Solicit Informant Contact</h4>
-                    <p className="text-[9px] text-slate-400 font-mono mt-0.5 font-medium leading-none">
-                      {freeBribeCooldown > 0 
-                        ? `Contact cooling down: ${freeBribeCooldown}s` 
-                        : 'Free contact request (+5 Actions)'}
-                    </p>
-                  </div>
-                  <button
-                    disabled={freeBribeCooldown > 0}
-                    onClick={() => {
-                      if (settings.soundEnabled) playSound('click');
-                      setActionsRemaining(prev => prev + 5);
-                      setFreeBribeCooldown(30); // 30 second cooldown
-                    }}
-                    className={`font-black text-[10px] px-3 py-2 rounded-xl border-2 border-slate-850 shadow-[2px_2px_0_0_#1e293b] transition-transform active:translate-y-0.5 ${
-                      freeBribeCooldown <= 0 
-                        ? 'bg-rose-400 hover:bg-rose-350 text-white cursor-pointer' 
-                        : 'bg-slate-200 text-slate-400 border-slate-300 shadow-none cursor-not-allowed'
-                    }`}
-                  >
-                    {freeBribeCooldown > 0 ? 'COOLING...' : '🤫 FREE'}
-                  </button>
-                </div>
-
-              </div>
-
-              <div className="pt-2 text-[9px] text-slate-400 font-mono leading-normal text-center bg-slate-50 rounded-2xl p-2.5">
-                🚨 WARNING: Federal regulators monitor transactions. Outrun the SEC by maintaining a healthy capital ratio. Let's make some serious bankroll!
-              </div>
-
             </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          )}
+
+          {/* ===== PHASE: GAME OVER ===== */}
+          {gameState.phase === 'game_over' && (
+            <motion.div
+              key="game_over"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="w-full flex-1 flex flex-col justify-center"
+            >
+              <div className="w-full bg-white rounded-[32px] border-4 border-slate-800 shadow-[8px_8px_0_0_#1e293b] p-6 text-center space-y-5">
+                <div className="flex justify-center">
+                  <div className="w-16 h-16 bg-red-100 rounded-2xl border-2 border-slate-800 flex items-center justify-center shadow-[3px_3px_0_0_#1e293b]">
+                    <Skull className="w-8 h-8 text-rose-500 animate-bounce" />
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-2xl font-black text-slate-800 font-sans tracking-tight uppercase">RUN OVER!</h3>
+                  <p className="text-[9px] font-mono uppercase tracking-widest text-slate-400 font-bold">
+                    {gameState.lastRoundPassed ? '⚡ THE GOAL WAS TOO HIGH ⚡' : '⚡ GOAL NOT MET ⚡'}
+                  </p>
+                </div>
+                {/* Mini chart of the final round's price action */}
+                {gameState.chartPoints.length >= 2 && (
+                  <div className="bg-slate-900 border-2 border-slate-800 rounded-[16px] p-1.5 shadow-[3px_3px_0_0_#1e293b]">
+                    <div className="flex items-center justify-between px-1 pb-1">
+                      <span className="text-[8px] text-slate-400 font-mono tracking-widest uppercase font-bold">{gameState.currentCompany?.ticker} · FINAL ROUND</span>
+                      <span className={`text-[8px] font-mono font-bold ${miniChart.stroke === '#10b981' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {currentPrice >= gameState.chartPoints[0] ? '▲' : '▼'} {formatMoney(currentPrice)}
+                      </span>
+                    </div>
+                    <svg viewBox="0 0 260 70" className="w-full h-[60px] overflow-visible">
+                      <path d={miniChart.fillD} fill="url(#miniChartGrad)" />
+                      <path d={miniChart.pathD} fill="none" stroke={miniChart.stroke} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </div>
+                )}
+                <div className="bg-slate-50 border-2 border-slate-800 rounded-[20px] p-4 space-y-2.5 font-mono text-[11px] text-left shadow-[3px_3px_0_0_#1e293b]">
+                  <div className="flex justify-between text-slate-500 font-bold">
+                    <span>Rounds Cleared:</span>
+                    <span className="text-slate-800">{gameState.roundNumber - 1}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-500 font-bold">
+                    <span>Stocks Traded:</span>
+                    <span className="text-slate-800">{gameState.companiesTradedCount}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-500 font-bold">
+                    <span>Peak Bankroll:</span>
+                    <span className="text-emerald-600">{formatMoney(gameState.highestCashInSession)}</span>
+                  </div>
+                  <div className="border-t border-slate-200 pt-2.5 flex justify-between items-center">
+                    <span className="font-extrabold text-slate-800">Rank:</span>
+                    <span className="bg-slate-800 text-yellow-300 font-black text-[8px] px-2.5 py-0.5 rounded-full uppercase tracking-wider">
+                      {gameState.highestCashInSession > 1000000 ? '👑 TYCOON' :
+                       gameState.highestCashInSession > 100000 ? '🚀 WHALE' :
+                       gameState.highestCashInSession > 10000 ? '🦁 PRO' : '🐹 ROOKIE'}
+                    </span>
+                  </div>
+                </div>
+                <div className="relative group w-full pt-1.5">
+                  <div className="absolute inset-0 bg-yellow-600 rounded-[18px] translate-y-1.5" />
+                  <button
+                    onClick={handleDoneGameOver}
+                    className="relative w-full bg-yellow-400 hover:bg-yellow-300 border-2 border-slate-800 text-slate-800 font-extrabold py-3 rounded-[18px] flex items-center justify-center gap-2 cursor-pointer text-xs transition-transform active:translate-y-1.5"
+                  >
+                    SUBMIT & EXIT
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+        </AnimatePresence>
+      </div>
     </div>
+  );
+}
+
+// ===== Rule Selection Sub-component =====
+interface RuleSelectProps {
+  company: Company;
+  hand: RuleCard[];
+  onConfirm: (rules: RuleCard[]) => void;
+  settings: GameSettings;
+  equipSize: number;
+  previouslySelected: string[];
+}
+
+function RuleSelectPhase({ company, hand, onConfirm, settings, equipSize, previouslySelected }: RuleSelectProps) {
+  // Pre-select any previously equipped rules that appear in this round's hand.
+  const [selected, setSelected] = useState<string[]>(() =>
+    hand.filter(c => previouslySelected.includes(c.id)).map(c => c.id)
+  );
+
+  const toggle = (id: string) => {
+    if (settings.soundEnabled) playSound('click');
+    setSelected(prev => {
+      if (prev.includes(id)) return prev.filter(x => x !== id);
+      if (prev.length >= equipSize) return prev;
+      return [...prev, id];
+    });
+  };
+
+  const volConfig = (() => {
+    const v = company.volatility;
+    if (v < 0.20) return '💎 Solid Safe';
+    if (v < 0.45) return '⚡ Normal Swing';
+    if (v < 0.70) return '🚀 Highly Volatile';
+    return '🔥 Speculative Chaos';
+  })();
+
+  return (
+    <motion.div
+      key="rule_select"
+      initial={{ opacity: 0, scale: 0.95, y: 15 }}
+      animate={{ opacity: 1, scale: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.95, y: -15 }}
+      className="w-full flex-1 flex flex-col"
+    >
+      <div className="w-full bg-white rounded-[32px] border-4 border-slate-800 shadow-[6px_6px_0_0_#1e293b] p-5 flex-1 flex flex-col space-y-3">
+        {/* Stock summary */}
+        <div className="bg-yellow-50 rounded-[20px] p-3 border-2 border-dashed border-slate-300 text-center">
+          <span className="text-sm bg-yellow-400 border border-slate-800 font-extrabold px-1.5 py-0.5 rounded font-mono">${company.ticker}</span>
+          <p className="text-base font-black mt-1 text-slate-800">{company.name}</p>
+          <p className="text-[9px] font-mono text-slate-500 mt-0.5">{volConfig} · ${company.basePrice.toFixed(2)}</p>
+        </div>
+
+        <div className="text-center">
+          <span className="text-[9px] bg-slate-800 text-white font-mono font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wider">
+            🤖 PROGRAM YOUR BOT
+          </span>
+          <p className="text-[10px] text-slate-500 mt-1 font-mono">Pick {equipSize} rule cards ({selected.length}/{equipSize})</p>
+        </div>
+
+        {/* Rule cards grid */}
+        <div className="grid grid-cols-2 gap-2 flex-1 overflow-y-auto p-1.5 -m-1.5">
+          {hand.map(card => {
+            const isSelected = selected.includes(card.id);
+            return (
+              <button
+                key={card.id}
+                onClick={() => toggle(card.id)}
+                className={`text-left p-2.5 rounded-2xl border-2 transition-all active:translate-y-0.5 shadow-[2px_2px_0_0_#1e293b] ${
+                  isSelected
+                    ? 'bg-yellow-300 border-slate-800 scale-[1.02]'
+                    : 'bg-white border-slate-800 hover:bg-slate-50'
+                }`}
+              >
+                <div className="flex items-start gap-1.5">
+                  <span className="text-lg shrink-0">{card.emoji}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[11px] font-black text-slate-800 leading-tight">{card.title}</p>
+                    <p className="text-[9px] text-slate-500 leading-snug mt-0.5">{card.description}</p>
+                    <span className={`inline-block mt-1 text-[7px] font-mono font-black px-1.5 py-0.5 rounded uppercase tracking-wider border ${
+                      card.action === 'buy' ? 'bg-emerald-50 text-emerald-700 border-emerald-400' :
+                      card.action === 'sell' ? 'bg-rose-50 text-rose-700 border-rose-400' :
+                      card.action === 'hold' ? 'bg-slate-100 text-slate-600 border-slate-400' :
+                      'bg-blue-50 text-blue-700 border-blue-400'
+                    }`}>
+                      {card.action === 'auto' ? '🤖 AUTO' : card.action.toUpperCase()}
+                    </span>
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Confirm */}
+        <div className="relative group w-full mt-4">
+          <div className={`absolute inset-0 rounded-[18px] translate-y-1.5 ${selected.length === equipSize ? 'bg-emerald-600' : 'bg-slate-300'}`} />
+          <button
+            disabled={selected.length !== equipSize}
+            onClick={() => onConfirm(hand.filter(c => selected.includes(c.id)))}
+            className={`relative w-full border-2 border-slate-800 font-black py-3 rounded-[18px] flex items-center justify-center gap-2 cursor-pointer text-xs transition-transform active:translate-y-1.5 ${
+              selected.length === equipSize
+                ? 'bg-emerald-400 hover:bg-emerald-300 text-white'
+                : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+            }`}
+          >
+            <Bot className="w-4 h-4" />
+            DEPLOY BOT 🚀
+          </button>
+        </div>
+      </div>
+    </motion.div>
   );
 }
