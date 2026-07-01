@@ -20,15 +20,6 @@ export const COMBOS: Combo[] = [
     bonusDescription: 'Dip entry fires at -3% instead of -5%',
   },
   {
-    id: 'news_flip',
-    name: 'News Flip',
-    description: 'Buy on good news, sell on bad news. Simple vibes-based alpha.',
-    emoji: '📰',
-    cardIds: ['c035', 'c048'],             // Headline Bull, Headline Bear
-    requiredIds: ['c035', 'c048'],
-    bonusDescription: 'Entry fires on any positive news (not just very positive)',
-  },
-  {
     id: 'momentum_train',
     name: 'Momentum Train',
     description: 'Buy the uptrend, hold it, sell the reversal. All aboard!',
@@ -42,9 +33,9 @@ export const COMBOS: Combo[] = [
     name: 'Contrarian',
     description: 'Buy when others sell, sell when others buy. Be the hero.',
     emoji: '🤡',
-    cardIds: ['c006', 'c013', 'c058'],     // Fear Buyer, Contrarian Entry, Doom Hold
-    requiredIds: ['c006', 'c058'],
-    bonusDescription: 'Entry fires on any negative news (not just very negative)',
+    cardIds: ['c005', 'c008', 'c058'],     // Blood Bath, Quiet Dip, Support Buyer
+    requiredIds: ['c005', 'c058'],
+    bonusDescription: 'Entry fires on any dip (relaxed threshold)',
   },
   {
     id: 'scalper',
@@ -135,16 +126,12 @@ export function getComboRelaxation(
     if (combo.id === 'dip_and_rip' && card.id === 'c002') {
       return { relaxed: true, bonusDescription: combo.bonusDescription };
     }
-    // News Flip: entry fires on any positive (not just very_positive)
-    if (combo.id === 'news_flip' && card.id === 'c035') {
-      return { relaxed: true, bonusDescription: combo.bonusDescription };
-    }
     // Momentum Train: entry fires at 2 up-ticks instead of 3
     if (combo.id === 'momentum_train' && card.id === 'c020') {
       return { relaxed: true, bonusDescription: combo.bonusDescription };
     }
-    // Contrarian: entry fires on any negative news
-    if (combo.id === 'contrarian' && card.id === 'c006') {
+    // Contrarian: entry fires on any dip
+    if (combo.id === 'contrarian' && card.id === 'c005') {
       return { relaxed: true, bonusDescription: combo.bonusDescription };
     }
     // Volatility Play: flat detection at 2 ticks instead of 3

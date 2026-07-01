@@ -1,9 +1,7 @@
-import { Company, RoundScript, NewsHeadline, PriceEvent } from '../types';
-import { getHeadlinesForCompany } from './headlines';
-import { getDifficultyFactor, getNewsImpactMultiplier } from './difficulty';
+import { Company, RoundScript } from '../types';
 
 /**
- * Deterministic price + news pre-generation for a round.
+ * Deterministic price pre-generation for a round.
  *
  * Uses a seeded PRNG (mulberry32) so the chart preview matches the actual
  * trading round exactly. The seed is derived from company.id + roundNumber
@@ -36,12 +34,8 @@ function hashSeed(str: string): number {
 
 /**
  * Generate the complete round script: initial 8-point history + all trading
- * tick prices + news events, using a seeded PRNG so the chart preview is
- * identical to the actual trading round.
- *
- * ponytail: ceiling — news is picked using the seeded RNG from the headline
- * pool. During actual trading the engine will re-generate from the same seed,
- * so preview and play match exactly.
+ * tick prices, using a seeded PRNG so the chart preview is identical to the
+ * actual trading round.
  */
 export function generateRoundScript(
   company: Company,
@@ -51,15 +45,8 @@ export function generateRoundScript(
 ): RoundScript {
   const seed = hashSeed(company.id + ':' + roundNumber);
   const rng = mulberry32(seed);
-  const difficultyFactor = getDifficultyFactor(0); // rough approximation for preview
-
-  // Pre-fetch the full headline pool for this company.
-  const headlinePool = getHeadlinesForCompany(company);
-  const usedIndices = new Set<number>();
 
   const prices: number[] = [];
-  const newsEvents: (PriceEvent | null)[] = [];
-
   let curPrice = company.basePrice;
 
   // Generate the 8-point initial history.
@@ -70,42 +57,13 @@ export function generateRoundScript(
     prices.push(curPrice);
   }
 
-  // Generate the trading ticks (1-based tickIndex, odd ticks get news).
+  // Generate the trading ticks.
   for (let tick = 1; tick <= totalTicks; tick++) {
-    let news: NewsHeadline | null = null;
-    let newsId: string | undefined;
-
-    if (tick % 2 === 1 && headlinePool.length > 0) {
-      // Pick a headline deterministically using the seeded RNG.
-      const available: number[] = [];
-      for (let idx = 0; idx < headlinePool.length; idx++) {
-        if (!usedIndices.has(idx)) available.push(idx);
-      }
-      // If all used, reset (shouldn't happen with 500+ headlines).
-      const pool = available.length > 0 ? available : headlinePool.map((_, i) => i);
-      const pickIdx = Math.floor(rng() * pool.length);
-      const realIdx = pool[pickIdx];
-      news = headlinePool[realIdx];
-      newsId = `${company.id}_${realIdx}`;
-      usedIndices.add(realIdx);
-    }
-
-    // Calculate the next price (same logic as generateNextPrice in ActiveGame).
-    let change: number;
-    if (news) {
-      const mult = getNewsImpactMultiplier(news.sentiment, difficultyFactor);
-      const totalImpact = news.impactPercent * mult;
-      const target = Math.max(1, curPrice * (1 + totalImpact));
-      change = (target - curPrice) * 0.4;
-    } else {
-      const rand = rng();
-      change = curPrice * (rand * company.volatility * 0.12 - company.volatility * 0.06 + company.trend * 0.04);
-    }
+    const rand = rng();
+    const change = curPrice * (rand * company.volatility * 0.12 - company.volatility * 0.06 + company.trend * 0.04);
     curPrice = Math.max(1, Number((curPrice + change).toFixed(2)));
     prices.push(curPrice);
-
-    newsEvents.push(news ? { news, newsId } : null);
   }
 
-  return { prices, newsEvents, historyLength };
+  return { prices, historyLength };
 }

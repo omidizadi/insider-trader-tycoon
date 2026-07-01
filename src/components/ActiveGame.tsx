@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import {
   Company, GameSessionState, GameSettings, TradePosition, START_CASH,
-  NewsHeadline, MAGNITUDE_META, RuleCard, RoundEvalContext, RoundScript
+  RuleCard, RoundEvalContext, RoundScript
 } from '../types';
 import { getRandomCompany } from '../companies';
 import { playSound } from '../utils/audio';
@@ -32,10 +32,6 @@ const RULE_EQUIP_SIZE = 5;
 // Number of initial history points.
 const HISTORY_LENGTH = 8;
 
-type LogEntry =
-  | { kind: 'news'; news: NewsHeadline; tick: number }
-  | { kind: 'action'; action: 'buy' | 'sell' | 'hold'; price: number; rule: RuleCard | null; tick: number; chartIndex: number };
-
 export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGame }: ActiveGameProps) {
   const [gameState, setGameState] = useState<GameSessionState>(() => ({
     cash: START_CASH,
@@ -57,15 +53,13 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
 
   // Rule selection hand for the current round.
   const [ruleHand, setRuleHand] = useState<RuleCard[]>([]);
-  // Trading log entries (news + bot actions).
-  const [log, setLog] = useState<LogEntry[]>([]);
+  // Trading log entries (bot actions only).
+  const [actionLog, setActionLog] = useState<{ action: 'buy' | 'sell' | 'hold'; price: number; rule: RuleCard | null; tick: number; chartIndex: number }[]>([]);
   // Current tick within the round.
   const [tickIndex, setTickIndex] = useState(0);
   // All-time high/low this round.
   const [roundHigh, setRoundHigh] = useState(0);
   const [roundLow, setRoundLow] = useState(0);
-  // News seen this round (for goal eval + bot context). Most recent first.
-  const [newsSeen, setNewsSeen] = useState<NewsHeadline[]>([]);
   // Biggest single-trade profit this round.
   const [biggestTradeProfit, setBiggestTradeProfit] = useState(0);
   // Trades count this round.
@@ -76,8 +70,6 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
   const [roundEnded, setRoundEnded] = useState(false);
   // The stock currently being previewed in the stock picker.
   const [previewCompany, setPreviewCompany] = useState<Company | null>(null);
-  // Whether the news/log panel is expanded on the trading screen.
-  const [newsExpanded, setNewsExpanded] = useState(false);
   // Shuffle charges remaining for the entire run (3 total).
   const [shuffleLeft, setShuffleLeft] = useState(3);
 
@@ -88,8 +80,7 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
   const roundLowRef = useRef(roundLow);
   const biggestTradeProfitRef = useRef(biggestTradeProfit);
   const tradesCountRef = useRef(tradesCount);
-  const newsSeenRef = useRef(newsSeen);
-  const logRef = useRef(log);
+  const actionLogRef = useRef(actionLog);
   const selectedRulesRef = useRef(gameState.selectedRules);
   const roundStartCashRef = useRef(gameState.roundStartCash);
   const currentRoundNumberRef = useRef(gameState.roundNumber);
@@ -97,8 +88,7 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
   useEffect(() => { roundLowRef.current = roundLow; }, [roundLow]);
   useEffect(() => { biggestTradeProfitRef.current = biggestTradeProfit; }, [biggestTradeProfit]);
   useEffect(() => { tradesCountRef.current = tradesCount; }, [tradesCount]);
-  useEffect(() => { newsSeenRef.current = newsSeen; }, [newsSeen]);
-  useEffect(() => { logRef.current = log; }, [log]);
+  useEffect(() => { actionLogRef.current = actionLog; }, [actionLog]);
   useEffect(() => { selectedRulesRef.current = gameState.selectedRules; }, [gameState.selectedRules]);
   useEffect(() => { roundStartCashRef.current = gameState.roundStartCash; }, [gameState.roundStartCash]);
   useEffect(() => { currentRoundNumberRef.current = gameState.roundNumber; }, [gameState.roundNumber]);
@@ -125,7 +115,6 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
     setGameState(prev => ({ ...prev, phase: 'stock_select', previewScript: script }));
   };
 
-  // Skip the previewed stock and roll a new one.
   const handleSkipStock = () => {
     if (settings.soundEnabled) playSound('skip');
     const comp = getRandomCompany(playedCompanyIds.current);
@@ -177,9 +166,8 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
       selectedRules: rules,
       phase: 'trading',
     }));
-    setLog([]);
+    setActionLog([]);
     setTickIndex(0);
-    setNewsSeen([]);
     setBiggestTradeProfit(0);
     setTradesCount(0);
     setLastBotAction(null);
@@ -210,32 +198,21 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
           const nextPrice = script.prices[script.historyLength + nextTick - 1] ?? curPrice;
           const nextPoints = [...prev.chartPoints, nextPrice];
 
-          // Get the pre-generated news event (if any) for this tick.
-          const newsEvent = script.newsEvents[nextTick - 1];
-          const news = newsEvent?.news ?? null;
-          if (news) {
-            setNewsSeen(prevNews => [news, ...prevNews]);
-            setLog(prevLog => [...prevLog, { kind: 'news', news, tick: nextTick }]);
-            if (settings.soundEnabled) playSound('click');
-          }
-
           setRoundHigh(h => Math.max(h, nextPrice));
           setRoundLow(l => (l === 0 ? nextPrice : Math.min(l, nextPrice)));
 
           // Build bot context.
-          const recentNews = news ? [news, ...newsSeenRef.current] : newsSeenRef.current;
           const botCtx: BotContext = {
             price: nextPrice,
             priceHistory: nextPoints.slice(-6),
             position: prev.position,
             cash: prev.cash,
             startCash: prev.roundStartCash,
-            recentNews,
             tickIndex: nextTick,
             totalTicks: TICKS_PER_ROUND,
             allTimeHigh: Math.max(roundHighRef.current, nextPrice),
             allTimeLow: roundLowRef.current === 0 ? nextPrice : Math.min(roundLowRef.current, nextPrice),
-            cardsFiredThisRound: logRef.current.filter(e => e.kind === 'action' && e.action !== 'hold').length,
+            cardsFiredThisRound: actionLogRef.current.filter(e => e.action !== 'hold').length,
           };
 
           const { action, firedRule } = resolveBotAction(selectedRulesRef.current, botCtx);
@@ -251,7 +228,7 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
                   avgBuyPrice: Number(((prev.position.investedCash + prev.cash) / (prev.position.shares + sharesBought)).toFixed(2)),
                 }
               : { ticker: prev.currentCompany!.ticker, shares: sharesBought, investedCash: prev.cash, avgBuyPrice: nextPrice };
-            setLog(prevLog => [...prevLog, { kind: 'action', action: 'buy', price: nextPrice, rule: firedRule, tick: nextTick, chartIndex: nextPoints.length - 1 }]);
+            setActionLog(prevLog => [...prevLog, { action: 'buy', price: nextPrice, rule: firedRule, tick: nextTick, chartIndex: nextPoints.length - 1 }]);
             setLastBotAction({ action: 'buy', rule: firedRule });
             if (settings.soundEnabled) playSound('buy');
             return { ...prev, cash: 0, position: updatedPosition, chartPoints: nextPoints };
@@ -262,12 +239,12 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
             setTradesCount(c => c + 1);
             const nextCash = Number((prev.cash + proceeds).toFixed(2));
             const peak = Math.max(prev.highestCashInSession, nextCash);
-            setLog(prevLog => [...prevLog, { kind: 'action', action: 'sell', price: nextPrice, rule: firedRule, tick: nextTick, chartIndex: nextPoints.length - 1 }]);
+            setActionLog(prevLog => [...prevLog, { action: 'sell', price: nextPrice, rule: firedRule, tick: nextTick, chartIndex: nextPoints.length - 1 }]);
             setLastBotAction({ action: 'sell', rule: firedRule });
             if (settings.soundEnabled) playSound(profit >= 0 ? 'win' : 'lose');
             return { ...prev, cash: nextCash, position: null, chartPoints: nextPoints, highestCashInSession: peak };
           } else {
-            setLog(prevLog => [...prevLog, { kind: 'action', action: 'hold', price: nextPrice, rule: firedRule, tick: nextTick, chartIndex: nextPoints.length - 1 }]);
+            setActionLog(prevLog => [...prevLog, { action: 'hold', price: nextPrice, rule: firedRule, tick: nextTick, chartIndex: nextPoints.length - 1 }]);
             setLastBotAction({ action: 'hold', rule: firedRule });
             return { ...prev, chartPoints: nextPoints };
           }
@@ -302,7 +279,6 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
                 returnPercent,
                 biggestSingleTradeProfit: biggestTradeProfitRef.current,
                 tradesCount: tradesCountRef.current,
-                newsSeen: newsSeenRef.current,
               };
               const round = getRound(prev.roundNumber);
               const passed = round.evaluate(evalCtx);
@@ -581,9 +557,6 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
                     const first = pts[0], last = pts[pts.length - 1];
                     const chartStroke = last >= first ? '#10b981' : '#f43f5e';
                     const histLen = gameState.previewScript.historyLength;
-                    const newsCoords = gameState.previewScript.newsEvents
-                      .map((ev, i) => ev ? coords[histLen + i] : null)
-                      .filter(Boolean) as { x: number; y: number }[];
                     return (
                       <div className="bg-slate-900 border-4 border-slate-800 rounded-[24px] p-2 relative shadow-inner">
                         <div className="flex items-center justify-between px-1 pb-1">
@@ -607,21 +580,18 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
                           {coords[histLen - 1] && (
                             <line x1={coords[histLen - 1].x} y1={previewPad} x2={coords[histLen - 1].x} y2={previewH - previewPad} stroke="#94a3b8" strokeWidth="1" strokeDasharray="4 3" opacity="0.5" />
                           )}
-                          {/* News event dots */}
-                          {newsCoords.map((c, i) => (
-                            <circle key={`news_dot_${i}`} cx={c.x} cy={c.y} r="3" fill="#fbbf24" stroke="#fff" strokeWidth="1" opacity="0.8" />
-                          ))}
                           {/* Start and end markers */}
                           <circle cx={coords[0].x} cy={coords[0].y} r="4" fill="#94a3b8" stroke="#fff" strokeWidth="1.5" />
                           <circle cx={coords[coords.length - 1].x} cy={coords[coords.length - 1].y} r="4" fill={chartStroke} stroke="#fff" strokeWidth="1.5" />
                         </svg>
                         <div className="flex justify-between px-1 pt-0.5">
-                          <span className="text-[7px] text-slate-500 font-mono">● {newsCoords.length} news events</span>
+                          <span className="text-[7px] text-slate-500 font-mono">Trend: {last >= first ? '📈 Growing' : '📉 Declining'}</span>
                           <span className="text-[7px] text-slate-500 font-mono">Range: {formatMoney(minVal)} — {formatMoney(maxVal)}</span>
                         </div>
                       </div>
                     );
                   })()}
+
                 </div>
 
                 {/* SKIP / CHOOSE buttons */}
@@ -729,11 +699,10 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
                     <circle cx={currentCoord.x} cy={currentCoord.y} r="6.5" fill="#10b981" stroke="#fff" strokeWidth="2.5" className="animate-pulse" />
 
                     {/* Buy/Sell transaction markers */}
-                    {log.filter(e => e.kind === 'action' && (e.action === 'buy' || e.action === 'sell')).map((entry, idx) => {
-                      const tx = entry as Extract<LogEntry, { kind: 'action' }>;
-                      const coord = chartInfo.coords[tx.chartIndex];
+                    {actionLog.filter(e => e.action === 'buy' || e.action === 'sell').map((entry, idx) => {
+                      const coord = chartInfo.coords[entry.chartIndex];
                       if (!coord) return null;
-                      const isBuy = tx.action === 'buy';
+                      const isBuy = entry.action === 'buy';
                       return (
                         <g key={`tx_${idx}`} className="animate-bounce">
                           <circle cx={coord.x} cy={coord.y} r="6.5" fill={isBuy ? '#10b981' : '#f43f5e'} stroke="#ffffff" strokeWidth="2.5" />
@@ -802,24 +771,16 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
                   )}
                 </div>
 
-                {/* News + action log — collapsed by default, expandable */}
+                {/* Bot action history */}
                 <div className="bg-slate-50 border-2 border-slate-800 rounded-[20px] shadow-[3px_3px_0_0_#1e293b] flex flex-col overflow-hidden">
-                  <button
-                    onClick={() => setNewsExpanded(v => !v)}
-                    className="w-full flex items-center justify-between px-2 py-1.5 cursor-pointer text-left"
-                  >
-                    <span className="text-[8px] font-mono font-bold uppercase text-slate-400 tracking-wider">📰 BREAKING NEWS & BOT LOG</span>
-                    <span className="text-[8px] font-mono font-bold text-slate-500">{newsExpanded ? '▲ HIDE' : '▼ SHOW'}</span>
-                  </button>
-                  {/* Latest entry preview — always 1 line, fixed height */}
+                  <div className="px-2 py-1.5">
+                    <span className="text-[8px] font-mono font-bold uppercase text-slate-400 tracking-wider">🤖 BOT ACTIONS</span>
+                  </div>
                   <div className="px-2 pb-1.5 h-[18px] overflow-hidden whitespace-nowrap text-ellipsis">
-                    {log.length === 0 ? (
+                    {actionLog.length === 0 ? (
                       <p className="text-[10px] text-slate-400 font-mono">Waiting for the bot to start trading...</p>
                     ) : (() => {
-                      const latest = log[log.length - 1];
-                      if (latest.kind === 'news') {
-                        return <p className="text-[10px] font-bold text-slate-700 truncate">📰 "{latest.news.text}"</p>;
-                      }
+                      const latest = actionLog[actionLog.length - 1];
                       return (
                         <p className={`text-[10px] font-mono font-bold truncate ${
                           latest.action === 'buy' ? 'text-emerald-700' :
@@ -831,39 +792,6 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
                       );
                     })()}
                   </div>
-                  {newsExpanded && (
-                    <div className="border-t-2 border-slate-200 p-2 max-h-[180px] overflow-y-auto">
-                      <div className="space-y-1.5">
-                        {log.slice().reverse().map((entry, idx) => {
-                          if (entry.kind === 'news') {
-                            const meta = MAGNITUDE_META[entry.news.magnitude];
-                            return (
-                              <div key={`log_${idx}`} className={`border-2 border-slate-300 rounded-lg p-2 ${meta.chipColor}`}>
-                                <div className="flex items-center justify-between mb-0.5">
-                                  <span className="text-[8px] font-mono font-black uppercase tracking-wider opacity-80">📰 {entry.news.source}</span>
-                                  <span className="text-[8px] font-mono font-black px-1.5 py-0.5 rounded border border-slate-800 bg-white">{meta.emoji} {meta.label}</span>
-                                </div>
-                                <p className="text-[10px] font-bold leading-snug">"{entry.news.text}"</p>
-                              </div>
-                            );
-                          } else {
-                            const isBuy = entry.action === 'buy';
-                            const isSell = entry.action === 'sell';
-                            return (
-                              <div key={`log_${idx}`} className={`text-[10px] font-mono font-bold px-2 py-1 rounded-lg border ${
-                                isBuy ? 'bg-emerald-50 text-emerald-700 border-emerald-300' :
-                                isSell ? 'bg-rose-50 text-rose-700 border-rose-300' :
-                                'bg-slate-100 text-slate-500 border-slate-300'
-                              }`}>
-                                🤖 BOT {entry.action.toUpperCase()} @ ${entry.price.toFixed(2)}
-                                {entry.rule && <span className="opacity-70"> · {entry.rule.emoji} {entry.rule.title}</span>}
-                              </div>
-                            );
-                          }
-                        })}
-                      </div>
-                    </div>
-                  )}
                 </div>
 
                 {/* Progress bar */}
