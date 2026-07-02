@@ -6,15 +6,16 @@ import {
 } from 'lucide-react';
 import {
   Company, GameSessionState, GameSettings, TradePosition, START_CASH,
-  RuleCard, RoundEvalContext, RoundScript
+  RuleCard, RoundEvalContext, RoundScript, ActiveCardEffect
 } from '../types';
 import { getRandomCompany } from '../companies';
 import { playSound } from '../utils/audio';
-import { pickRuleChoices } from '../data/rules';
+import { pickRuleChoices, pickCardOffer, pickSwapOffer, TIER_WEIGHTS } from '../data/rules';
 import { getRound } from '../data/rounds';
 import { resolveBotAction, BotContext } from '../utils/botEngine';
 import { generateRoundScript } from '../utils/priceEngine';
 import { detectCombos, getComboProgress, isComboComplete } from '../utils/combos';
+import { initRoundEffects, processFiredCardEffect, processTickEffects, tickDownEffects, hasActionEffect } from '../utils/cardEffects';
 
 interface ActiveGameProps {
   settings: GameSettings;
@@ -25,12 +26,22 @@ interface ActiveGameProps {
 
 // Number of ticks per trading round. The bot acts once per tick.
 const TICKS_PER_ROUND = 12;
-// Number of rule cards the player picks from.
-const RULE_HAND_SIZE = 8;
-// Number of rules the player equips.
-const RULE_EQUIP_SIZE = 5;
+// Maximum cards the player can own in their persistent deck.
+const MAX_DECK_SIZE = 5;
+// Number of cards offered each acquisition/swap phase.
+const CARD_OFFER_SIZE = 3;
 // Number of initial history points.
 const HISTORY_LENGTH = 8;
+
+// Tier display config: label, border color, glow color, rarity %.
+const TIER_CONFIG: Record<number, { label: string; border: string; glow: string; rarity: string }> = {
+  0: { label: 'Basic', border: 'border-amber-700', glow: 'shadow-amber-200', rarity: '40%' },
+  1: { label: 'Uncommon', border: 'border-emerald-600', glow: 'shadow-emerald-200', rarity: '25%' },
+  2: { label: 'Rare', border: 'border-sky-600', glow: 'shadow-sky-200', rarity: '15%' },
+  3: { label: 'Epic', border: 'border-violet-600', glow: 'shadow-violet-200', rarity: '10%' },
+  4: { label: 'Legendary', border: 'border-orange-500', glow: 'shadow-orange-200', rarity: '7%' },
+  5: { label: 'Mythic', border: 'border-rose-500', glow: 'shadow-rose-200', rarity: '3%' },
+};
 
 export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGame }: ActiveGameProps) {
   const [gameState, setGameState] = useState<GameSessionState>(() => ({
@@ -38,6 +49,7 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
     roundStartCash: START_CASH,
     currentCompany: null,
     selectedRules: [],
+    persistentCards: [],
     chartPoints: [],
     position: null,
     phase: 'round_intro',
@@ -49,10 +61,13 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
     lastRoundPassed: false,
     roundScript: null,
     previewScript: null,
+    activeEffects: [],
+    totalTicks: TICKS_PER_ROUND,
+    swapUsedThisRound: false,
   }));
 
-  // Rule selection hand for the current round.
-  const [ruleHand, setRuleHand] = useState<RuleCard[]>([]);
+  // Card offer for the acquisition/swap phase.
+  const [cardOffer, setCardOffer] = useState<RuleCard[]>([]);
   // Trading log entries (bot actions only).
   const [actionLog, setActionLog] = useState<{ action: 'buy' | 'sell' | 'hold'; price: number; rule: RuleCard | null; tick: number; chartIndex: number }[]>([]);
   // Current tick within the round.
@@ -72,6 +87,8 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
   const [previewCompany, setPreviewCompany] = useState<Company | null>(null);
   // Shuffle charges remaining for the entire run (3 total).
   const [shuffleLeft, setShuffleLeft] = useState(3);
+  // Event banner text (for card effect events like flash crash, whale pump).
+  const [eventBanner, setEventBanner] = useState<string | null>(null);
 
   const playedCompanyIds = useRef<string[]>([]);
 
@@ -123,7 +140,7 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
     setGameState(prev => ({ ...prev, previewScript: script }));
   };
 
-  // ===== PHASE: stock_select → rule_select =====
+  // ===== PHASE: stock_select → card_shop (acquisition/swap) =====
   const handlePickStock = () => {
     if (!previewCompany || !gameState.previewScript) return;
     if (settings.soundEnabled) playSound('click');
@@ -136,35 +153,69 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
       currentCompany: nextComp,
       chartPoints: script.prices.slice(0, script.historyLength),
       position: null,
-      phase: 'rule_select',
+      phase: 'card_shop',
       companiesTradedCount: prev.companiesTradedCount + 1,
       roundScript: script,
+      swapUsedThisRound: false,
     }));
 
-    setRuleHand(pickRuleChoices(RULE_HAND_SIZE, [], gameState.selectedRules.map(r => r.id)));
+    // Generate card offer based on deck state.
+    const ownedIds = gameState.persistentCards.map(c => c.id);
+    setCardOffer(pickCardOffer(CARD_OFFER_SIZE, ownedIds));
     setRoundHigh(script.prices[script.historyLength - 1]);
     setRoundLow(script.prices[script.historyLength - 1]);
   };
 
-  // Shuffle unselected cards in the rule hand (costs 1 charge, 3 per run).
-  const handleShuffleHand = (currentSelectedIds: string[]) => {
+  // Shuffle the card offer (costs 1 charge, 3 per run).
+  const handleShuffleOffer = () => {
     if (shuffleLeft <= 0) return;
     if (settings.soundEnabled) playSound('click');
     setShuffleLeft(prev => prev - 1);
-    setRuleHand(prev => {
-      const kept = prev.filter(c => currentSelectedIds.includes(c.id));
-      const fresh = pickRuleChoices(RULE_HAND_SIZE - kept.length, [], []);
-      return [...kept, ...fresh].sort(() => Math.random() - 0.5);
-    });
+    const ownedIds = gameState.persistentCards.map(c => c.id);
+    setCardOffer(pickCardOffer(CARD_OFFER_SIZE, ownedIds));
   };
 
-  // ===== PHASE: rule_select → trading =====
-  const handleEquipRules = (rules: RuleCard[]) => {
+  // Confirm acquisition: add selected new cards to deck, then proceed to trading.
+  const handleConfirmAcquisition = (newCards: RuleCard[], removedCardIds: string[] = []) => {
+    if (settings.soundEnabled) playSound('click');
+    setGameState(prev => {
+      const newDeck = [
+        ...prev.persistentCards.filter(c => !removedCardIds.includes(c.id)),
+        ...newCards,
+      ];
+      return {
+        ...prev,
+        persistentCards: newDeck,
+        selectedRules: newDeck,
+        phase: 'trading',
+        activeEffects: initRoundEffects(newDeck),
+        totalTicks: TICKS_PER_ROUND,
+        swapUsedThisRound: removedCardIds.length > 0,
+      };
+    });
+    setActionLog([]);
+    setTickIndex(0);
+    setBiggestTradeProfit(0);
+    setTradesCount(0);
+    setLastBotAction(null);
+    setRoundEnded(false);
+    setEventBanner(null);
+  };
+
+  // Confirm swap: remove marked cards, add selected new cards, then proceed.
+  const handleConfirmSwap = (newCards: RuleCard[], removedCardIds: string[]) => {
+    handleConfirmAcquisition(newCards, removedCardIds);
+  };
+
+  // Skip the card shop (keep current deck, go straight to trading).
+  const handleSkipCardShop = () => {
     if (settings.soundEnabled) playSound('click');
     setGameState(prev => ({
       ...prev,
-      selectedRules: rules,
+      selectedRules: prev.persistentCards,
       phase: 'trading',
+      activeEffects: initRoundEffects(prev.persistentCards),
+      totalTicks: TICKS_PER_ROUND,
     }));
     setActionLog([]);
     setTickIndex(0);
@@ -172,6 +223,7 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
     setTradesCount(0);
     setLastBotAction(null);
     setRoundEnded(false);
+    setEventBanner(null);
   };
 
   // ===== THE TRADING LOOP =====
@@ -195,7 +247,29 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
           if (!script) return prev;
 
           // Get the pre-generated price for this tick.
-          const nextPrice = script.prices[script.historyLength + nextTick - 1] ?? curPrice;
+          let nextPrice = script.prices[script.historyLength + nextTick - 1] ?? curPrice;
+
+          // Process tick-level card effects (chart mods, random events).
+          const effectCtx = {
+            tickIndex: nextTick,
+            totalTicks: prev.totalTicks,
+            chartPoints: prev.chartPoints,
+            cash: prev.cash,
+            startCash: prev.roundStartCash,
+            position: prev.position,
+            roundScript: script,
+            activeEffects: prev.activeEffects,
+          };
+          const tickEffect = processTickEffects(effectCtx);
+          if (tickEffect.modifiedNextPrice !== null) {
+            nextPrice = tickEffect.modifiedNextPrice;
+          }
+          if (tickEffect.eventBanner) {
+            setEventBanner(tickEffect.eventBanner);
+          }
+          // Apply cash delta from tick effects (e.g., safety net, phoenix).
+          let cashAfterTick = prev.cash + tickEffect.cashDelta;
+
           const nextPoints = [...prev.chartPoints, nextPrice];
 
           setRoundHigh(h => Math.max(h, nextPrice));
@@ -206,52 +280,109 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
             price: nextPrice,
             priceHistory: nextPoints.slice(-6),
             position: prev.position,
-            cash: prev.cash,
+            cash: cashAfterTick,
             startCash: prev.roundStartCash,
             tickIndex: nextTick,
-            totalTicks: TICKS_PER_ROUND,
+            totalTicks: prev.totalTicks,
             allTimeHigh: Math.max(roundHighRef.current, nextPrice),
             allTimeLow: roundLowRef.current === 0 ? nextPrice : Math.min(roundLowRef.current, nextPrice),
             cardsFiredThisRound: actionLogRef.current.filter(e => e.action !== 'hold').length,
           };
 
-          const { action, firedRule } = resolveBotAction(selectedRulesRef.current, botCtx);
+          const { action, firedRule, positionSize } = resolveBotAction(selectedRulesRef.current, botCtx);
+
+          // Process fired card's effect (for hybrid/event cards).
+          let tickDelta = tickEffect.tickDelta;
+          let newEffects = [...tickEffect.newEffects];
+          let removeEffectIds = [...tickEffect.removeEffectCardIds];
+          let forceSell = tickEffect.forceSell;
+          let cashDelta = tickEffect.cashDelta;
+          if (firedRule && hasActionEffect(firedRule)) {
+            const firedEffect = processFiredCardEffect(firedRule, effectCtx);
+            if (firedEffect.modifiedNextPrice !== null) nextPrice = firedEffect.modifiedNextPrice;
+            tickDelta += firedEffect.tickDelta;
+            cashDelta += firedEffect.cashDelta;
+            newEffects.push(...firedEffect.newEffects);
+            removeEffectIds.push(...firedEffect.removeEffectCardIds);
+            forceSell = forceSell || firedEffect.forceSell;
+            if (firedEffect.eventBanner) setEventBanner(firedEffect.eventBanner);
+          }
+
+          // Update total ticks if a card modified it.
+          const newTotalTicks = Math.max(1, prev.totalTicks + tickDelta);
+
+          // ponytail: passive card effects that modify trade prices/quantities.
+          const midasEffect = prev.activeEffects.find(e => e.kind === 'midas_touch' || e.kind === 'midas_buy');
+          const marketMakerEffect = prev.activeEffects.find(e => e.kind === 'market_maker');
+          const doubleExposureEffect = prev.activeEffects.find(e => e.kind === 'double_exposure');
+          const alchemistEffect = prev.activeEffects.find(e => e.kind === 'alchemist');
 
           // Execute the action.
-          if (action === 'buy' && prev.cash >= 1) {
-            const sharesBought = prev.cash / nextPrice;
+          if ((action === 'buy' || forceSell === false) && action === 'buy' && cashAfterTick >= 1) {
+            // Apply buy-time passive effects.
+            let buyPrice = nextPrice;
+            if (marketMakerEffect) buyPrice *= (1 - marketMakerEffect.magnitude / 100);
+            if (midasEffect) buyPrice *= (1 - midasEffect.magnitude / 100);
+            let investFraction = positionSize;
+            if (doubleExposureEffect) investFraction = Math.min(1, investFraction * doubleExposureEffect.magnitude);
+            const investCash = Number((cashAfterTick * investFraction).toFixed(2));
+            const remainingCash = Number((cashAfterTick - investCash).toFixed(2));
+            const sharesBought = investCash / buyPrice;
             const updatedPosition: TradePosition = prev.position
               ? {
                   ticker: prev.currentCompany!.ticker,
                   shares: prev.position.shares + sharesBought,
-                  investedCash: prev.position.investedCash + prev.cash,
-                  avgBuyPrice: Number(((prev.position.investedCash + prev.cash) / (prev.position.shares + sharesBought)).toFixed(2)),
+                  investedCash: prev.position.investedCash + investCash,
+                  avgBuyPrice: Number(((prev.position.investedCash + investCash) / (prev.position.shares + sharesBought)).toFixed(2)),
                 }
-              : { ticker: prev.currentCompany!.ticker, shares: sharesBought, investedCash: prev.cash, avgBuyPrice: nextPrice };
+              : { ticker: prev.currentCompany!.ticker, shares: sharesBought, investedCash: investCash, avgBuyPrice: buyPrice };
             setActionLog(prevLog => [...prevLog, { action: 'buy', price: nextPrice, rule: firedRule, tick: nextTick, chartIndex: nextPoints.length - 1 }]);
             setLastBotAction({ action: 'buy', rule: firedRule });
             if (settings.soundEnabled) playSound('buy');
-            return { ...prev, cash: 0, position: updatedPosition, chartPoints: nextPoints };
-          } else if (action === 'sell' && prev.position) {
-            const proceeds = prev.position.shares * nextPrice;
+            // Update active effects.
+            const updatedEffects = tickDownEffects(
+              newEffects.length > 0 || removeEffectIds.length > 0
+                ? prev.activeEffects.filter(e => !removeEffectIds.includes(e.cardId)).concat(newEffects)
+                : prev.activeEffects
+            );
+            return { ...prev, cash: remainingCash, position: updatedPosition, chartPoints: nextPoints, activeEffects: updatedEffects, totalTicks: newTotalTicks };
+          } else if ((action === 'sell' || forceSell) && prev.position) {
+            // Apply sell-time passive effects.
+            let sellPrice = nextPrice;
+            if (marketMakerEffect) sellPrice *= (1 + marketMakerEffect.magnitude / 100);
+            if (alchemistEffect) {
+              const minSellPrice = prev.position.avgBuyPrice * (1 - alchemistEffect.magnitude / 100);
+              sellPrice = Math.max(sellPrice, minSellPrice);
+            }
+            const proceeds = prev.position.shares * sellPrice;
             const profit = proceeds - prev.position.investedCash;
             setBiggestTradeProfit(b => Math.max(b, profit));
             setTradesCount(c => c + 1);
-            const nextCash = Number((prev.cash + proceeds).toFixed(2));
+            const nextCash = Number((cashAfterTick + proceeds + cashDelta).toFixed(2));
             const peak = Math.max(prev.highestCashInSession, nextCash);
             setActionLog(prevLog => [...prevLog, { action: 'sell', price: nextPrice, rule: firedRule, tick: nextTick, chartIndex: nextPoints.length - 1 }]);
             setLastBotAction({ action: 'sell', rule: firedRule });
             if (settings.soundEnabled) playSound(profit >= 0 ? 'win' : 'lose');
-            return { ...prev, cash: nextCash, position: null, chartPoints: nextPoints, highestCashInSession: peak };
+            const updatedEffects = tickDownEffects(
+              newEffects.length > 0 || removeEffectIds.length > 0
+                ? prev.activeEffects.filter(e => !removeEffectIds.includes(e.cardId)).concat(newEffects)
+                : prev.activeEffects
+            );
+            return { ...prev, cash: nextCash, position: null, chartPoints: nextPoints, highestCashInSession: peak, activeEffects: updatedEffects, totalTicks: newTotalTicks };
           } else {
             setActionLog(prevLog => [...prevLog, { action: 'hold', price: nextPrice, rule: firedRule, tick: nextTick, chartIndex: nextPoints.length - 1 }]);
             setLastBotAction({ action: 'hold', rule: firedRule });
-            return { ...prev, chartPoints: nextPoints };
+            const updatedEffects = tickDownEffects(
+              newEffects.length > 0 || removeEffectIds.length > 0
+                ? prev.activeEffects.filter(e => !removeEffectIds.includes(e.cardId)).concat(newEffects)
+                : prev.activeEffects
+            );
+            return { ...prev, chartPoints: nextPoints, cash: cashAfterTick, activeEffects: updatedEffects, totalTicks: newTotalTicks };
           }
         });
 
         // End of round?
-        if (nextTick >= TICKS_PER_ROUND) {
+        if (nextTick >= (gameState.totalTicks || TICKS_PER_ROUND)) {
           clearInterval(intervalId);
           setRoundEnded(true);
           // Force-sell any open position at the final price, then evaluate.
@@ -438,7 +569,7 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
           {gameState.phase === 'trading' && (
             <div className="text-right leading-none">
               <span className="text-[9px] font-mono tracking-wider uppercase text-slate-300 block">TICK</span>
-              <span className="font-mono font-black text-xs text-yellow-400">{tickIndex}/{TICKS_PER_ROUND}</span>
+              <span className="font-mono font-black text-xs text-yellow-400">{tickIndex}/{gameState.totalTicks || TICKS_PER_ROUND}</span>
             </div>
           )}
         </div>
@@ -626,17 +757,18 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
             </motion.div>
           )}
 
-          {/* ===== PHASE: RULE SELECT ===== */}
-          {gameState.phase === 'rule_select' && gameState.currentCompany && (
-            <RuleSelectPhase
+          {/* ===== PHASE: CARD SHOP (acquisition/swap) ===== */}
+          {gameState.phase === 'card_shop' && gameState.currentCompany && (
+            <CardShopPhase
               company={gameState.currentCompany}
-              hand={ruleHand}
-              onConfirm={handleEquipRules}
-              settings={settings}
-              equipSize={RULE_EQUIP_SIZE}
-              previouslySelected={gameState.selectedRules.map(r => r.id)}
+              offer={cardOffer}
+              deck={gameState.persistentCards}
+              maxDeckSize={MAX_DECK_SIZE}
+              onConfirmAcquire={handleConfirmAcquisition}
+              onConfirmSwap={handleConfirmSwap}
+              onSkip={handleSkipCardShop}
               shuffleLeft={shuffleLeft}
-              onShuffle={handleShuffleHand}
+              onShuffle={handleShuffleOffer}
             />
           )}
 
@@ -662,21 +794,35 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
                   </div>
                 </div>
 
-                {/* Equipped rules */}
+                {/* Equipped deck */}
                 <div className="bg-slate-50 border-2 border-slate-800 rounded-xl p-2 shadow-[2px_2px_0_0_#1e293b]">
-                  <span className="text-[8px] font-mono font-bold uppercase text-slate-400 tracking-wider block mb-1.5">🤖 BOT PROGRAMMED WITH:</span>
+                  <span className="text-[8px] font-mono font-bold uppercase text-slate-400 tracking-wider block mb-1.5">🤖 BOT DECK ({gameState.persistentCards.length}/{MAX_DECK_SIZE}):</span>
                   <div className="flex gap-1.5 flex-wrap">
-                    {gameState.selectedRules.map(r => (
-                      <span key={r.id} className={`text-[9px] font-mono font-bold px-2 py-1 rounded-lg border-2 border-slate-800 ${
-                        lastBotAction?.rule?.id === r.id
-                          ? 'bg-yellow-300 text-slate-800 animate-pulse'
-                          : 'bg-white text-slate-600'
-                      }`}>
-                        {r.emoji} {r.title}
-                      </span>
-                    ))}
+                    {gameState.persistentCards.length === 0 && (
+                      <span className="text-[9px] font-mono text-slate-400 italic">No cards — using default bot strategy</span>
+                    )}
+                    {gameState.persistentCards.map(r => {
+                      const tierCfg = TIER_CONFIG[r.tier];
+                      return (
+                        <span key={r.id} className={`text-[9px] font-mono font-bold px-2 py-1 rounded-lg border-2 ${tierCfg.border} ${
+                          lastBotAction?.rule?.id === r.id
+                            ? 'bg-yellow-300 text-slate-800 animate-pulse'
+                            : 'bg-white text-slate-600'
+                        }`}>
+                          {r.emoji} {r.title}
+                          <span className="ml-1 text-[7px] opacity-60">T{r.tier}</span>
+                        </span>
+                      );
+                    })}
                   </div>
                 </div>
+
+                {/* Event banner (card effects) */}
+                {eventBanner && (
+                  <div className="border-2 border-violet-500 bg-violet-50 rounded-xl p-2 text-center font-mono text-xs font-black text-violet-700 shadow-[2px_2px_0_0_#1e293b] animate-pulse">
+                    ⚡ {eventBanner}
+                  </div>
+                )}
 
                 {/* Chart */}
                 <div className="bg-slate-900 border-4 border-slate-800 rounded-[24px] p-2 relative h-[150px] flex flex-col justify-end overflow-hidden shadow-inner">
@@ -798,7 +944,7 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
                 <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden border border-slate-800">
                   <motion.div
                     className="bg-emerald-500 h-full rounded-full"
-                    animate={{ width: `${(tickIndex / TICKS_PER_ROUND) * 100}%` }}
+                    animate={{ width: `${(tickIndex / (gameState.totalTicks || TICKS_PER_ROUND)) * 100}%` }}
                     transition={{ ease: 'linear', duration: 0.5 }}
                   />
                 </div>
@@ -979,32 +1125,25 @@ export default function ActiveGame({ settings, runsCount, onFinishGame, onExitGa
   );
 }
 
-// ===== Rule Selection Sub-component =====
-interface RuleSelectProps {
+// ===== Card Shop Sub-component (acquisition/swap) =====
+interface CardShopProps {
   company: Company;
-  hand: RuleCard[];
-  onConfirm: (rules: RuleCard[]) => void;
-  settings: GameSettings;
-  equipSize: number;
-  previouslySelected: string[];
+  offer: RuleCard[];
+  deck: RuleCard[];
+  maxDeckSize: number;
+  onConfirmAcquire: (newCards: RuleCard[], removedCardIds?: string[]) => void;
+  onConfirmSwap: (newCards: RuleCard[], removedCardIds: string[]) => void;
+  onSkip: () => void;
   shuffleLeft: number;
-  onShuffle: (currentSelectedIds: string[]) => void;
+  onShuffle: () => void;
 }
 
-function RuleSelectPhase({ company, hand, onConfirm, settings, equipSize, previouslySelected, shuffleLeft, onShuffle }: RuleSelectProps) {
-  // Pre-select any previously equipped rules that appear in this round's hand.
-  const [selected, setSelected] = useState<string[]>(() =>
-    hand.filter(c => previouslySelected.includes(c.id)).map(c => c.id)
-  );
-
-  const toggle = (id: string) => {
-    if (settings.soundEnabled) playSound('click');
-    setSelected(prev => {
-      if (prev.includes(id)) return prev.filter(x => x !== id);
-      if (prev.length >= equipSize) return prev;
-      return [...prev, id];
-    });
-  };
+function CardShopPhase({ company, offer, deck, maxDeckSize, onConfirmAcquire, onConfirmSwap, onSkip, shuffleLeft, onShuffle }: CardShopProps) {
+  const isAcquisition = deck.length < maxDeckSize;
+  // Cards from the offer that the player has selected to add.
+  const [selectedNew, setSelectedNew] = useState<string[]>([]);
+  // Cards from the deck that the player has marked for removal (swap mode).
+  const [selectedRemove, setSelectedRemove] = useState<string[]>([]);
 
   const volConfig = (() => {
     const v = company.volatility;
@@ -1014,130 +1153,250 @@ function RuleSelectPhase({ company, hand, onConfirm, settings, equipSize, previo
     return '🔥 Speculative Chaos';
   })();
 
+  // Toggle a new card selection (from the offer).
+  const toggleNew = (id: string) => {
+    setSelectedNew(prev => {
+      if (prev.includes(id)) return prev.filter(x => x !== id);
+      // Max picks: in acquisition mode, can't exceed remaining slots; in swap mode, can't exceed removed count.
+      const maxPicks = isAcquisition
+        ? maxDeckSize - (deck.length - selectedRemove.length)
+        : selectedRemove.length;
+      if (prev.length >= maxPicks) return prev;
+      return [...prev, id];
+    });
+  };
+
+  // Toggle a deck card for removal (swap mode only).
+  const toggleRemove = (id: string) => {
+    setSelectedRemove(prev => {
+      if (prev.includes(id)) {
+        // Removing from removal list — also drop any excess selected new cards.
+        const newCap = prev.length - 1;
+        setSelectedNew(n => n.slice(0, newCap));
+        return prev.filter(x => x !== id);
+      }
+      return [...prev, id];
+    });
+  };
+
+  const canConfirm = isAcquisition
+    ? selectedNew.length > 0
+    : selectedNew.length > 0 && selectedNew.length === selectedRemove.length;
+
+  const handleConfirm = () => {
+    const newCards = offer.filter(c => selectedNew.includes(c.id));
+    if (isAcquisition) {
+      onConfirmAcquire(newCards, selectedRemove);
+    } else {
+      onConfirmSwap(newCards, selectedRemove);
+    }
+  };
+
+  // Computed card lists.
+  const pickedCards = offer.filter(c => selectedNew.includes(c.id));
+  const remainingOffer = offer.filter(c => !selectedNew.includes(c.id));
+  const removedDeckCards = deck.filter(c => selectedRemove.includes(c.id));
+  // Deck shown at top = existing kept cards + newly picked cards (fused together).
+  const deckView = [
+    ...deck.filter(c => !selectedRemove.includes(c.id)),
+    ...pickedCards,
+  ];
+
   return (
     <motion.div
-      key="rule_select"
+      key="card_shop"
       initial={{ opacity: 0, scale: 0.95, y: 15 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.95, y: -15 }}
       className="w-full flex-1 flex flex-col"
     >
-      <div className="w-full bg-white rounded-[32px] border-4 border-slate-800 shadow-[6px_6px_0_0_#1e293b] p-5 flex-1 flex flex-col space-y-3">
+      <div className="w-full bg-white rounded-[32px] border-4 border-slate-800 shadow-[6px_6px_0_0_#1e293b] p-4 flex-1 flex flex-col space-y-3">
         {/* Stock summary */}
-        <div className="bg-yellow-50 rounded-[20px] p-3 border-2 border-dashed border-slate-300 text-center">
+        <div className="bg-yellow-50 rounded-[16px] p-2 border-2 border-dashed border-slate-300 text-center">
           <span className="text-sm bg-yellow-400 border border-slate-800 font-extrabold px-1.5 py-0.5 rounded font-mono">${company.ticker}</span>
-          <p className="text-base font-black mt-1 text-slate-800">{company.name}</p>
-          <p className="text-[9px] font-mono text-slate-500 mt-0.5">{volConfig} · ${company.basePrice.toFixed(2)}</p>
+          <span className="text-[9px] font-mono text-slate-500 ml-2">{volConfig} · ${company.basePrice.toFixed(2)}</span>
         </div>
 
+        {/* Phase header */}
         <div className="text-center">
           <span className="text-[9px] bg-slate-800 text-white font-mono font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wider">
-            🤖 PROGRAM YOUR BOT
+            {isAcquisition ? `🎴 CARD SHOP — DECK ${deck.length}/${maxDeckSize}` : '🔄 SWAP SHOP — TRADE CARDS'}
           </span>
-          <p className="text-[10px] text-slate-500 mt-1 font-mono">Pick {equipSize} rule cards ({selected.length}/{equipSize})</p>
+          <p className="text-[10px] text-slate-500 mt-1 font-mono">
+            {isAcquisition
+              ? `Tap your deck cards to remove, tap offered to add. Pick at least one new card to deploy.`
+              : 'Tap your cards to remove them, then tap offered cards to swap in.'}
+          </p>
         </div>
 
-        {/* Rule cards grid */}
-        <div className="grid grid-cols-2 gap-2 flex-1 overflow-y-auto p-1.5 -m-1.5">
-          {hand.map(card => {
-            const isSelected = selected.includes(card.id);
-            const selectedCards = hand.filter(c => selected.includes(c.id));
-            const activeCombos = detectCombos(selectedCards);
-            const cardCombo = activeCombos.find(c => c.cardIds.includes(card.id));
-            const isPartOfCombo = !!cardCombo;
-            const comboFull = cardCombo ? isComboComplete(cardCombo, new Set(selected)) : false;
+        {/* YOUR DECK (top) — kept + newly picked cards fused together */}
+        {deckView.length > 0 ? (
+          <div className="bg-slate-50 border-2 border-slate-800 rounded-xl p-2 shadow-[2px_2px_0_0_#1e293b]">
+            <span className="text-[8px] font-mono font-bold uppercase text-slate-400 tracking-wider block mb-1.5">
+              🤖 YOUR DECK ({deckView.length}/{maxDeckSize})
+              {removedDeckCards.length > 0 && <span className="text-rose-500"> · -{removedDeckCards.length} in trash</span>}
+              {pickedCards.length > 0 && <span className="text-emerald-600"> · {pickedCards.length} new</span>}
+            </span>
+            <div className="grid grid-cols-3 gap-1.5">
+              {deckView.map(card => {
+                const tierCfg = TIER_CONFIG[card.tier];
+                const isNewPick = pickedCards.includes(card);
+                return (
+                  <button
+                    key={card.id}
+                    onClick={() => isNewPick ? toggleNew(card.id) : toggleRemove(card.id)}
+                    className={`text-left p-1.5 rounded-lg border-2 transition-all cursor-pointer bg-white ${tierCfg.border} hover:bg-rose-50 hover:border-rose-400`}
+                  >
+                    <div className="flex items-start gap-1">
+                      <span className="text-sm shrink-0">{card.emoji}</span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[9px] font-black text-slate-800 leading-tight truncate">{card.title}</p>
+                        <p className="text-[7px] text-slate-500 leading-tight line-clamp-2">{card.description}</p>
+                        <p className="text-[6px] font-mono text-slate-400">
+                          T{card.tier}
+                          <span className="text-rose-500 font-black"> · tap to remove</span>
+                        </p>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          <div className="bg-slate-50 border-2 border-slate-800 rounded-xl p-2 shadow-[2px_2px_0_0_#1e293b]">
+            <span className="text-[8px] font-mono font-bold uppercase text-slate-400 tracking-wider block mb-1.5">🤖 YOUR DECK (0/{maxDeckSize}):</span>
+            <p className="text-[10px] text-slate-400 italic font-mono py-1">Empty deck — pick cards below to begin</p>
+          </div>
+        )}
 
-            // Tag colors
-            const tagColors: Record<string, string> = {
-              dip: 'bg-rose-100 text-rose-700 border-rose-300',
-              surge: 'bg-emerald-100 text-emerald-700 border-emerald-300',
-              'news+': 'bg-blue-100 text-blue-700 border-blue-300',
-              'news-': 'bg-orange-100 text-orange-700 border-orange-300',
-              news: 'bg-sky-100 text-sky-700 border-sky-300',
-              pattern: 'bg-purple-100 text-purple-700 border-purple-300',
-              position: 'bg-amber-100 text-amber-700 border-amber-300',
-              timing: 'bg-indigo-100 text-indigo-700 border-indigo-300',
-              wild: 'bg-pink-100 text-pink-700 border-pink-300',
-            };
-            const roleIcons: Record<string, string> = { entry: '🛒', exit: '💸', hold: '🤲' };
-
-            return (
-              <button
-                key={card.id}
-                onClick={() => toggle(card.id)}
-                className={`text-left p-2.5 rounded-2xl border-2 transition-all active:translate-y-0.5 shadow-[2px_2px_0_0_#1e293b] ${
-                  isSelected
-                    ? 'bg-yellow-300 border-slate-800 scale-[1.02]'
-                    : 'bg-white border-slate-800 hover:bg-slate-50'
-                }`}
-              >
-                <div className="flex items-start gap-1.5">
-                  <span className="text-lg shrink-0">{card.emoji}</span>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[11px] font-black text-slate-800 leading-tight">{card.title}</p>
-                    <p className="text-[9px] text-slate-500 leading-snug mt-0.5">{card.description}</p>
-                    {/* Tags row */}
-                    <div className="flex flex-wrap gap-1 mt-1">
-                      <span className={`text-[7px] font-mono font-black px-1.5 py-0.5 rounded border ${tagColors[card.triggerTag] ?? 'bg-slate-100 text-slate-600 border-slate-300'}`}>
-                        {card.triggerTag.toUpperCase()}
-                      </span>
-                      <span className={`text-[7px] font-mono font-black px-1.5 py-0.5 rounded uppercase tracking-wider border ${
+        <div className="flex-1 flex flex-col min-h-0">
+          <span className="text-[8px] font-mono font-bold uppercase text-slate-400 tracking-wider block mb-1.5">
+            🎴 OFFERED CARDS ({remainingOffer.length} left):
+          </span>
+          {remainingOffer.length === 0 ? (
+            <p className="text-[10px] text-slate-400 italic font-mono py-2 text-center">All offered cards picked ✓</p>
+          ) : (
+          <div className="grid grid-cols-3 gap-1.5 flex-1 overflow-y-auto p-0.5">
+            {remainingOffer.map(card => {
+              const tierCfg = TIER_CONFIG[card.tier];
+              const canSelect = isAcquisition
+                ? selectedNew.length < (maxDeckSize - (deck.length - selectedRemove.length))
+                : selectedNew.length < selectedRemove.length;
+              return (
+                <button
+                  key={card.id}
+                  disabled={!canSelect}
+                  onClick={() => toggleNew(card.id)}
+                  className={`text-left p-1.5 rounded-lg border-2 transition-all active:translate-y-0.5 ${
+                    canSelect
+                      ? `bg-white ${tierCfg.border} hover:bg-slate-50 cursor-pointer`
+                      : 'bg-slate-100 border-slate-300 opacity-40 cursor-not-allowed'
+                  }`}
+                >
+                  <div className="flex flex-col gap-0.5">
+                    <div className="flex items-center gap-1">
+                      <span className="text-lg shrink-0">{card.emoji}</span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[10px] font-black text-slate-800 leading-tight truncate">{card.title}</p>
+                        <p className="text-[6px] font-mono text-slate-400">T{card.tier} · {tierCfg.label}</p>
+                      </div>
+                    </div>
+                    <p className="text-[8px] text-slate-500 leading-tight line-clamp-2">{card.description}</p>
+                    <div className="flex flex-wrap gap-0.5">
+                      <span className={`text-[6px] font-mono font-black px-1 py-0.5 rounded border uppercase ${
                         card.action === 'buy' ? 'bg-emerald-50 text-emerald-700 border-emerald-400' :
                         card.action === 'sell' ? 'bg-rose-50 text-rose-700 border-rose-400' :
                         'bg-slate-100 text-slate-600 border-slate-400'
                       }`}>
-                        {roleIcons[card.roleTag] ?? ''} {card.action.toUpperCase()}
+                        {card.action}
+                      </span>
+                      <span className="text-[6px] font-mono font-black px-1 py-0.5 rounded border bg-violet-50 text-violet-700 border-violet-300 uppercase">
+                        {card.effectType}
                       </span>
                     </div>
-                    {/* Combo badge */}
-                    {isPartOfCombo && cardCombo && (
-                      <div className={`mt-1 text-[7px] font-mono font-black px-1.5 py-0.5 rounded border ${
-                        comboFull
-                          ? 'bg-yellow-200 text-yellow-800 border-yellow-400 animate-pulse'
-                          : 'bg-violet-50 text-violet-600 border-violet-300'
-                      }`}>
-                        {comboFull ? '🔥' : '🔗'} {cardCombo.name}
-                      </div>
-                    )}
                   </div>
-                </div>
-              </button>
-            );
-          })}
+                </button>
+              );
+            })}
+          </div>
+          )}
         </div>
 
-        {/* Shuffle + Confirm */}
-        <div className="flex gap-2 mt-4">
+        {/* REMOVED DECK CARDS (trash) — visible any time, click to restore */}
+        {removedDeckCards.length > 0 && (
+          <div className="bg-slate-100 border-2 border-slate-400 border-dashed rounded-xl p-2">
+            <span className="text-[8px] font-mono font-bold uppercase text-slate-500 tracking-wider block mb-1.5">
+              🗑 TO BE REMOVED ({removedDeckCards.length}):
+            </span>
+            <div className="grid grid-cols-3 gap-1.5">
+              {removedDeckCards.map(card => {
+                const tierCfg = TIER_CONFIG[card.tier];
+                return (
+                  <button
+                    key={card.id}
+                    onClick={() => toggleRemove(card.id)}
+                    className={`text-left p-1.5 rounded-lg border-2 transition-all active:translate-y-0.5 bg-slate-50 ${tierCfg.border} opacity-60 cursor-pointer hover:opacity-100`}
+                  >
+                    <div className="flex items-start gap-1">
+                      <span className="text-sm shrink-0 grayscale">{card.emoji}</span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[9px] font-black text-slate-600 leading-tight truncate">{card.title}</p>
+                        <p className="text-[6px] font-mono text-slate-500 font-black">🗑 tap to restore</p>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Shuffle + Confirm + Skip */}
+        <div className="flex gap-2 pt-1">
           {/* Shuffle button */}
           <div className="relative group">
             <div className={`absolute inset-0 rounded-[18px] translate-y-1.5 ${shuffleLeft > 0 ? 'bg-violet-600' : 'bg-slate-300'}`} />
             <button
               disabled={shuffleLeft <= 0}
-              onClick={() => onShuffle(selected)}
-              className={`relative border-2 border-slate-800 font-black py-3 px-4 rounded-[18px] flex items-center justify-center gap-1.5 cursor-pointer text-xs transition-transform active:translate-y-1.5 ${
+              onClick={onShuffle}
+              className={`relative border-2 border-slate-800 font-black py-3 px-3 rounded-[18px] flex items-center justify-center gap-1 cursor-pointer text-xs transition-transform active:translate-y-1.5 ${
                 shuffleLeft > 0
                   ? 'bg-violet-400 hover:bg-violet-300 text-white'
                   : 'bg-slate-100 text-slate-400 cursor-not-allowed'
               }`}
             >
-              🔀 Shuffle ({shuffleLeft})
+              🔀 ({shuffleLeft})
             </button>
           </div>
 
           {/* Confirm button */}
           <div className="relative group flex-1">
-            <div className={`absolute inset-0 rounded-[18px] translate-y-1.5 ${selected.length === equipSize ? 'bg-emerald-600' : 'bg-slate-300'}`} />
+            <div className={`absolute inset-0 rounded-[18px] translate-y-1.5 ${canConfirm ? 'bg-emerald-600' : 'bg-slate-300'}`} />
             <button
-              disabled={selected.length !== equipSize}
-              onClick={() => onConfirm(hand.filter(c => selected.includes(c.id)))}
+              disabled={!canConfirm}
+              onClick={handleConfirm}
               className={`relative w-full border-2 border-slate-800 font-black py-3 rounded-[18px] flex items-center justify-center gap-2 cursor-pointer text-xs transition-transform active:translate-y-1.5 ${
-                selected.length === equipSize
+                canConfirm
                   ? 'bg-emerald-400 hover:bg-emerald-300 text-white'
                   : 'bg-slate-100 text-slate-400 cursor-not-allowed'
               }`}
             >
               <Bot className="w-4 h-4" />
-              DEPLOY BOT 🚀
+              {isAcquisition
+                ? `ADD ${selectedNew.length} CARD${selectedNew.length !== 1 ? 'S' : ''} & DEPLOY 🚀`
+                : `SWAP ${selectedNew.length} CARD${selectedNew.length !== 1 ? 'S' : ''} & DEPLOY 🚀`}
+            </button>
+          </div>
+
+          {/* Skip button */}
+          <div className="relative group">
+            <div className="absolute inset-0 rounded-[18px] translate-y-1.5 bg-slate-600" />
+            <button
+              onClick={onSkip}
+              className="relative border-2 border-slate-800 font-black py-3 px-3 rounded-[18px] flex items-center justify-center gap-1 cursor-pointer text-xs transition-transform active:translate-y-1.5 bg-slate-400 hover:bg-slate-300 text-white"
+            >
+              SKIP
             </button>
           </div>
         </div>

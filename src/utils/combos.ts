@@ -15,17 +15,17 @@ export const COMBOS: Combo[] = [
     name: 'Dip & Rip',
     description: 'Buy the dip, ride the wave, sell at the peak. The classic swing trade.',
     emoji: '🔥',
-    cardIds: ['c002', 'c017', 'c024'],   // Dip Buyer, Momentum Entry, Profit Taker
-    requiredIds: ['c002', 'c024'],         // Need at least entry + exit
-    bonusDescription: 'Dip entry fires at -3% instead of -5%',
+    cardIds: ['t005', 't013', 't015'],   // Dip Buyer, Momentum, Profit Target
+    requiredIds: ['t005', 't015'],         // Need at least entry + exit
+    bonusDescription: 'Dip entry fires at -2% instead of -3%',
   },
   {
     id: 'momentum_train',
     name: 'Momentum Train',
     description: 'Buy the uptrend, hold it, sell the reversal. All aboard!',
     emoji: '🚂',
-    cardIds: ['c020', 'c029', 'c026'],     // Trend Surfer, Trend Rider, Peak Seller
-    requiredIds: ['c020', 'c026'],
+    cardIds: ['t010', 't112', 't011'],     // Trend Rider, Trend Surfer, Red Alert
+    requiredIds: ['t010', 't011'],
     bonusDescription: 'Entry fires at 2 up-ticks instead of 3',
   },
   {
@@ -33,8 +33,8 @@ export const COMBOS: Combo[] = [
     name: 'Contrarian',
     description: 'Buy when others sell, sell when others buy. Be the hero.',
     emoji: '🤡',
-    cardIds: ['c005', 'c008', 'c058'],     // Blood Bath, Quiet Dip, Support Buyer
-    requiredIds: ['c005', 'c058'],
+    cardIds: ['t111', 't122', 't104'],     // Contrarian, Blood Bath, Support Bounce
+    requiredIds: ['t111', 't104'],
     bonusDescription: 'Entry fires on any dip (relaxed threshold)',
   },
   {
@@ -42,17 +42,17 @@ export const COMBOS: Combo[] = [
     name: 'Scalper',
     description: 'Buy early, sell quick. In and out before anyone notices.',
     emoji: '⚡',
-    cardIds: ['c079', 'c076'],             // Early Bird, Quick Flip
-    requiredIds: ['c079', 'c076'],
-    bonusDescription: 'Quick flip fires at any profit (no minimum)',
+    cardIds: ['t017', 't110', 't009'],     // Early Bird, Scalper, Quick Exit
+    requiredIds: ['t017', 't009'],
+    bonusDescription: 'Quick exit fires at any profit (no minimum)',
   },
   {
     id: 'safe_haven',
     name: 'Safe Haven',
     description: 'Cautious entry, protected hold, timed exit. Safety first.',
     emoji: '🛡️',
-    cardIds: ['c066', 'c067', 'c083'],     // Cash Guard, Diamond Hands, Clock Watcher
-    requiredIds: ['c066', 'c083'],
+    cardIds: ['t113', 't007', 't016'],     // Cash Guard, Diamond Hands, Last Call
+    requiredIds: ['t113', 't016'],
     bonusDescription: 'Exit fires 10% earlier in the round',
   },
   {
@@ -60,8 +60,8 @@ export const COMBOS: Combo[] = [
     name: 'YOLO Moon',
     description: 'All in. Hold forever. Moon or bust. No in-between.',
     emoji: '🌙',
-    cardIds: ['c065', 'c094'],             // All In, Moon Shot
-    requiredIds: ['c065', 'c094'],
+    cardIds: ['t018', 't125'],             // All In, Moonshot Hold
+    requiredIds: ['t018', 't125'],
     bonusDescription: 'All-in buys with 110% effective cash (bonus shares)',
   },
   {
@@ -69,8 +69,8 @@ export const COMBOS: Combo[] = [
     name: 'Volatility Play',
     description: 'Buy the calm, sell the chaos. Profit from the explosion.',
     emoji: '💥',
-    cardIds: ['c062', 'c063', 'c052'],     // Calm Before Storm, Flatline Buyer, After Storm
-    requiredIds: ['c062', 'c052'],
+    cardIds: ['t107', 't012', 't106'],     // Calm Before Storm, Flat Entry, Volatility Rider
+    requiredIds: ['t107', 't106'],
     bonusDescription: 'Flat detection fires at 2 flat ticks instead of 3',
   },
 ];
@@ -122,20 +122,20 @@ export function getComboRelaxation(
   for (const combo of activeCombos) {
     if (!combo.cardIds.includes(card.id)) continue;
 
-    // Dip & Rip: entry dip threshold relaxes from -5% to -3%
-    if (combo.id === 'dip_and_rip' && card.id === 'c002') {
+    // Dip & Rip: entry dip threshold relaxes from -3% to -2%
+    if (combo.id === 'dip_and_rip' && card.id === 't005') {
       return { relaxed: true, bonusDescription: combo.bonusDescription };
     }
     // Momentum Train: entry fires at 2 up-ticks instead of 3
-    if (combo.id === 'momentum_train' && card.id === 'c020') {
+    if (combo.id === 'momentum_train' && card.id === 't010') {
       return { relaxed: true, bonusDescription: combo.bonusDescription };
     }
     // Contrarian: entry fires on any dip
-    if (combo.id === 'contrarian' && card.id === 'c005') {
+    if (combo.id === 'contrarian' && card.id === 't111') {
       return { relaxed: true, bonusDescription: combo.bonusDescription };
     }
     // Volatility Play: flat detection at 2 ticks instead of 3
-    if (combo.id === 'volatility_play' && (card.id === 'c062' || card.id === 'c063')) {
+    if (combo.id === 'volatility_play' && (card.id === 't107' || card.id === 't012')) {
       return { relaxed: true, bonusDescription: combo.bonusDescription };
     }
   }
